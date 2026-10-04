@@ -79,6 +79,67 @@ offset pattern to extend a prior run (see `dfs_engine/diagnostics.py`
 for the lower-level `save_checkpoint` / `load_checkpoint` helpers if you
 want to checkpoint across process restarts).
 
+### Pull in SportsGameOdds lines + prop-based baseline projections
+
+[SportsGameOdds](https://sportsgameodds.com) aggregates sportsbook odds and
+publishes a vig-free consensus ("fair") line for every market. The
+`sgo-*` commands use it two ways:
+
+1. **Vegas lines** — the consensus game total, spread and team totals
+   overwrite `game_total` / `spread` / `team_total` for every matched team,
+   so the correlated sim is anchored to the current market.
+2. **Market-implied baseline projection** — each player's full-game props
+   (passing/rushing/receiving yards, receptions, pass/rush/rec/anytime TDs,
+   INTs) are converted to an expected DraftKings score: yardage props are
+   modeled as log-normal around the line (so the mean sits a bit above the
+   median line, and 100/300-yard bonuses are priced from the same
+   distribution), and count props as Poisson, using the vig-free over
+   probability. The result is blended into `proj`:
+   `proj = (1 - weight) * proj + weight * sgo_proj` (default `weight=0.5`).
+   A blank `proj` is filled with `sgo_proj` outright, and `ceiling` is
+   scaled by the same ratio.
+
+```bash
+export SPORTSGAMEODDS_API_KEY=your_key
+
+# 1. Snapshot the slate's events (lines + props) to JSON
+python -m dfs_engine.cli sgo-fetch \
+    --starts-after 2026-10-04T00:00:00Z --starts-before 2026-10-06T12:00:00Z \
+    --out data/week5_sgo_events.json \
+    --lines-out data/week5_lines.csv --baseline-out data/week5_sgo_baseline.csv
+
+# 2. Blend into your player pool, then build as usual
+python -m dfs_engine.cli sgo-enrich \
+    --pool data/week5_players.csv --events data/week5_sgo_events.json \
+    --weight 0.5 --out data/week5_players_sgo.csv
+python -m dfs_engine.cli build --pool data/week5_players_sgo.csv ...
+```
+
+Omit `--events` to fetch live inside `sgo-enrich`. Useful flags:
+`--keep-pool-lines` (only fill blank line columns), `--no-lines`,
+`--no-props`, `--bookmaker draftkings` (restrict odds to one or more books).
+The enriched CSV keeps audit columns (`proj_input`, `sgo_proj`,
+`sgo_markets`, `sgo_imputed`, `proj_source`) so you can see where your
+numbers and the market disagree. Try it offline with the bundled sample:
+
+```bash
+python -m dfs_engine.cli sgo-enrich --pool data/sample_classic_pool.csv \
+    --events data/sample_sgo_events.json --out enriched.csv
+```
+
+Notes:
+- Players are matched by normalized name (accents, punctuation and
+  Jr./III suffixes stripped), tie-broken by team. Unmatched players and
+  DSTs keep their input projection, and the command lists them.
+- A player needs at least one core market (QB: pass yards; RB: rush or
+  rec yards; WR/TE: rec yards or receptions) to get a baseline. When a TD
+  or INT market is missing it is imputed from yardage (listed in
+  `sgo_imputed`), but players with thin prop coverage — e.g. an RB with
+  only a rushing-yards line — will be understated, so check
+  `sgo_markets` before leaning on a low `sgo_proj`.
+- Fumbles, return TDs and 2-pt conversions aren't priced by props, so
+  the baseline is slightly conservative.
+
 ## Player pool CSV format
 
 Required columns: `name, team, opp, position, salary, proj, own, ceiling,
@@ -103,12 +164,15 @@ dfs_engine/
   optimize.py     # MILP solver (Classic + Showdown)
   portfolio.py    # N-lineup portfolio builder (exposure caps, uniqueness)
   diagnostics.py  # Optimal% leverage diagnostic
+  sportsgameodds.py # SportsGameOdds fetch, game lines, prop -> DK baseline
   cli.py          # command-line entry points
 tests/
   test_engine.py  # pytest-style tests
+  test_sportsgameodds.py
   run_tests.py    # standalone runner (no pytest dependency)
 data/
   sample_classic_pool.csv
+  sample_sgo_events.json  # SGO /events snapshot matching the sample pool
 ```
 
 ## Testing
@@ -127,9 +191,10 @@ python3 tests/run_tests.py
   hit a genuine combinatorial ceiling (fewer unique lineups available
   than requested) — the builder detects this and stops rather than
   looping forever.
-- **This engine does not generate projections, ownership, or Vegas
-  lines itself.** It expects those as input (from a projections source
-  such as a paid provider, or your own model) in the player pool CSV.
+- **This engine does not generate ownership itself**, and its own
+  projections come only from the SportsGameOdds prop baseline above. For
+  best results supply your own `proj` (from a paid provider or your
+  model) and use SGO as the market baseline to blend against.
 - **ROI/EV against a real massive-field contest** (hundreds of thousands
   of entries) is not implemented here. Estimating absolute payout
   probabilities against a field that large requires realistically

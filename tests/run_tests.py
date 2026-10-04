@@ -7,6 +7,7 @@ import sys
 import traceback
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.dirname(__file__))
 
 import numpy as np
 from dfs_engine.data import load_player_pool, validate_showdown_pool
@@ -14,6 +15,8 @@ from dfs_engine.simulate import simulate_player_scores, skewed_noise
 from dfs_engine.optimize import solve_classic, solve_showdown, SALARY_CAP
 from dfs_engine.portfolio import build_portfolio
 from dfs_engine.diagnostics import run_optimal_pct_chunk, leverage_report
+
+from test_sportsgameodds import *  # noqa: E402,F401,F403
 
 POOL_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "sample_classic_pool.csv")
 

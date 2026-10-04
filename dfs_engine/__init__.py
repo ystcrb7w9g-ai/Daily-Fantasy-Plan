@@ -11,6 +11,7 @@ Modules:
     optimize    -- MILP lineup solver (Classic + Showdown)
     portfolio   -- build N lineups with exposure caps + uniqueness
     diagnostics -- Optimal% leverage diagnostic (SaberSim-style)
+    sportsgameodds -- SportsGameOdds lines + prop-implied baseline projections
 """
 
 __version__ = "0.1.0"
