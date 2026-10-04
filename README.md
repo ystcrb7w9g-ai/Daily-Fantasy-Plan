@@ -196,9 +196,9 @@ into an upload-ready file:
 
 ```bash
 # 1. Pool with DK IDs + kickoff times, merged with your projections
-#    (CSV with name, proj and optionally team, position, own, ceiling)
+#    (and optionally hand-entered Vegas lines instead of step 2)
 python -m dfs_engine.cli dk-pool --entries DKEntries.csv \
-    --projections my_projections.csv --out data/main_pool.csv
+    --projections my_projections.csv [--lines lines.csv] --out data/main_pool.csv
 
 # 2. Vegas lines (+ prop baseline) from SportsGameOdds
 python -m dfs_engine.cli sgo-enrich --pool data/main_pool.csv \
@@ -216,6 +216,15 @@ python -m dfs_engine.cli dk-run --pool data/main_pool_sgo.csv \
 
 Then upload `dk_upload.csv` on DraftKings' Edit Entries page.
 
+- **Projections input.** A CSV export or a table copied from a website and
+  saved as text (tab-separated is fine) both work. Headers are matched
+  loosely: `Player`/`Name`, `Pos`, `Team`, `Proj`/`Projected Points`/`FPTS`,
+  `Own`/`Ownership`/`Blended Ownership`, `Ceiling`. Values like `18.5%` and
+  `$7,700` are parsed. `dk-pool` reports how many players matched, which
+  names didn't, and the ownership total (a full slate is ~900%).
+- **Manual Vegas lines.** `--lines` takes a CSV of `team,spread,total`
+  (negative spread = favorite). One team per game is enough; the
+  opponent's spread and both team totals are derived.
 - **One candidate pool and one field are shared** by every contest in the
   file. Each contest is priced under its own size and payout curve, and
   gets its own portfolio for the number of entries you hold in it.

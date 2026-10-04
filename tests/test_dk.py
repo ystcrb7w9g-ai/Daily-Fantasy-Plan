@@ -256,3 +256,56 @@ def test_dk_run_end_to_end():
     rows = list(csv.reader(open(up, encoding="utf-8")))
     lineups = [frozenset(r[4:13]) for r in rows[1:]]
     assert len(set(lineups)) == len(lineups)  # no lineup reused across contests
+
+
+# --- projections / lines import -------------------------------------------
+
+def test_standardize_projection_columns_handles_web_table_headers():
+    raw = pd.DataFrame({
+        "Player": ["Josh Allen", "Bills D/ST"], "Pos": ["QB", "DST"], "Salary": ["$7,700", "$3,000"],
+        "Projected Points": ["24.1", "8.0"], "Pts/Salary": ["3.13", "2.67"],
+        "Blended Ownership": ["18.5%", "9%"], "Rush Touchdowns": ["0.4", "0"],
+    })
+    out = dk.standardize_projection_columns(raw)
+    assert set(out.columns) == {"name", "position", "salary", "proj", "own"}
+    assert out["proj"].tolist() == [24.1, 8.0]
+    assert out["own"].tolist() == [18.5, 9.0]
+    assert out["salary"].tolist() == [7700, 3000]
+
+
+def test_standardize_projection_columns_reports_unknown_headers():
+    try:
+        dk.standardize_projection_columns(pd.DataFrame({"Who": ["x"], "How many": [1]}))
+        raise AssertionError("accepted a table with no name/projection columns")
+    except ValueError as e:
+        assert "Who" in str(e)
+
+
+def test_read_projections_reads_pasted_tab_separated_table():
+    d = tempfile.mkdtemp()
+    path = os.path.join(d, "paste.txt")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("Player\tPos\tProj\tOwn%\nJosh Allen\tQB\t24.1\t18.5%\nCJ Stroud\tQB\t17.2\t6%\n")
+    out = dk.read_projections(path)
+    assert out["name"].tolist() == ["Josh Allen", "CJ Stroud"] and out["own"].tolist() == [18.5, 6.0]
+
+
+def test_dst_name_variants_match():
+    right = pd.DataFrame({"name": ["Bills", "Ravens"], "position": ["DST", "DST"], "team": ["BUF", "BAL"]})
+    left = pd.DataFrame({"name": ["Bills D/ST", "BUF", "Baltimore Ravens Defense", "Ravens DST"],
+                         "position": ["DST", "DEF", "D", "DST"]})
+    assert dk.match_players(left, right).tolist() == [0, 0, 1, 1]
+
+
+def test_read_lines_infers_opponent_and_team_totals():
+    df, path, d = _fixture()
+    ef = dk.read_entry_file(path)
+    lp = os.path.join(d, "lines.csv")
+    with open(lp, "w") as f:
+        f.write("team,spread,total\nAAA,-6.5,47.5\nDDD,3,41\n")
+    lines = dk.read_lines(lp, ef.players).set_index("team")
+    assert lines.loc["AAA", "team_total"] == 27.0 and lines.loc["BBB", "team_total"] == 20.5
+    assert lines.loc["BBB", "spread"] == 6.5 and lines.loc["CCC", "spread"] == -3.0
+    pool, _ = dk.pool_from_entry_file(ef)
+    pool, missing = dk.apply_lines(pool, lines.reset_index())
+    assert missing == [] and pool["game_total"].notna().all()

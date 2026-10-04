@@ -112,6 +112,9 @@ def _match_key(name: str, position: str, team: str | None) -> str:
     return normalize_name(name)
 
 
+_DST_WORDS = re.compile(r"\b(dst|d st|def|defense|defence|special teams)\b")
+
+
 def match_players(left: pd.DataFrame, right: pd.DataFrame) -> pd.Series:
     """
     For each row of `left` (name, position?, team?), the index of the
@@ -129,10 +132,15 @@ def match_players(left: pd.DataFrame, right: pd.DataFrame) -> pd.Series:
         is_dst = pos in ("DST", "DEF", "D/ST", "D")
         cand = by_key.get(_match_key(row["name"], "DST" if is_dst else pos, team))
         if cand is None and is_dst and not team:
-            # Name-only DST row ("Buffalo Bills"): match a DK DST whose name it ends with.
-            nm = normalize_name(row["name"])
-            hits = r[(r["position"] == "DST") & r["name"].map(lambda n: nm.endswith(normalize_name(n)))]
-            cand = hits if len(hits) else None
+            # Name-only DST row ("Buffalo Bills", "Bills D/ST", "BUF"): match on the
+            # team abbreviation, or a DK DST name the row's name ends with.
+            raw = str(row["name"]).strip().upper()
+            if normalize_abbr(raw) in set(r["team"]):
+                cand = by_key.get(f"DST|{normalize_abbr(raw)}")
+            else:
+                nm = _DST_WORDS.sub("", normalize_name(row["name"])).strip()
+                hits = r[(r["position"] == "DST") & r["name"].map(lambda n: nm.endswith(normalize_name(n)))]
+                cand = hits if len(hits) else None
         if cand is not None and len(cand) > 1 and team:
             same = cand[cand["team"] == normalize_abbr(team)]
             cand = same if len(same) else cand
@@ -140,12 +148,117 @@ def match_players(left: pd.DataFrame, right: pd.DataFrame) -> pd.Series:
     return pd.Series(out, index=left.index, dtype="float")
 
 
+# Header aliases for projection exports / copied web tables (e.g. GoingFor2,
+# which shows player, salary, opponent, projected points, points per
+# salary and blended ownership). Headers are compared lowercased with
+# everything but letters and digits removed.
+PROJECTION_ALIASES = {
+    "name": ["name", "player", "playername", "players", "fullname"],
+    "position": ["pos", "position", "dkpos", "dkposition", "rosterposition"],
+    "team": ["team", "tm", "teamabbrev", "teamabbr"],
+    "proj": ["proj", "projection", "projections", "projected", "projectedpoints", "projectedpts",
+             "projpts", "projpoints", "projectedfpts", "projfpts", "fpts", "fantasypoints",
+             "points", "pts", "dkproj", "dkprojection", "dkfpts", "median", "fppg"],
+    "own": ["own", "ownership", "projown", "projectedown", "projectedownership", "blendedownership",
+            "blendedown", "blended", "pown", "ownpct", "ownershippct", "ownershippercent", "dkown",
+            "dkownership"],
+    "ceiling": ["ceiling", "ceil", "ceilingpts", "projceiling"],
+    "salary": ["salary", "sal", "dksalary", "dksal"],
+}
+
+
+def _norm_header(h: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(h).lower())
+
+
+def standardize_projection_columns(raw: pd.DataFrame) -> pd.DataFrame:
+    """
+    Rename a projections table's columns to name / position / team / proj /
+    own / ceiling / salary using `PROJECTION_ALIASES`, falling back to
+    "contains own" / "starts with proj" for unlisted headers. Value
+    columns accept strings like "18.5%", "$7,700". Raises with the
+    headers it saw if it can't find a name and projection column.
+    """
+    lookup = {alias: std for std, aliases in PROJECTION_ALIASES.items() for alias in aliases}
+    rename, taken = {}, set()
+    for col in raw.columns:
+        std = lookup.get(_norm_header(col))
+        if std and std not in taken:
+            rename[col] = std
+            taken.add(std)
+    for col in raw.columns:
+        if col in rename:
+            continue
+        h = _norm_header(col)
+        # "...own", "...ownership", "...ownpct" -- but not e.g. "touchdowns"
+        if "own" not in taken and (h.startswith("own") or re.search(r"own(ership)?(pct|percent)?$", h)):
+            rename[col] = "own"
+            taken.add("own")
+        elif "proj" not in taken and h.startswith("proj") and not re.search(r"sal|val|per|own", h):
+            rename[col] = "proj"
+            taken.add("proj")
+    out = raw.rename(columns=rename)[list(rename.values())].copy()
+    if not {"name", "proj"} <= set(out.columns):
+        raise ValueError(f"Couldn't find player-name and projection columns in: {list(raw.columns)}")
+    for col in ("proj", "own", "ceiling", "salary"):
+        if col in out.columns:
+            out[col] = pd.to_numeric(
+                out[col].astype(str).str.replace(r"[%$,\s]", "", regex=True), errors="coerce")
+    out["name"] = out["name"].astype(str).str.strip()
+    return out[out["name"].ne("") & out["name"].ne("nan")]
+
+
+def read_projections(path: str) -> pd.DataFrame:
+    """Read a projections CSV/TSV (or a table pasted into a text file) and standardize it."""
+    raw = pd.read_csv(path, sep=None, engine="python", encoding="utf-8-sig")
+    return standardize_projection_columns(raw)
+
+
+def read_lines(path: str, players: pd.DataFrame) -> pd.DataFrame:
+    """
+    Vegas lines typed in by hand: one row per team (at least one team per
+    game) with `team`, `spread` (negative = favored) and `total` (or
+    `game_total`), optionally `team_total`. The opponent's row is inferred
+    from the slate. Returns team, game_total, spread, team_total.
+    """
+    raw = pd.read_csv(path, sep=None, engine="python", encoding="utf-8-sig")
+    raw.columns = [_norm_header(c) for c in raw.columns]
+    raw = raw.rename(columns={"gametotal": "total", "ou": "total", "overunder": "total",
+                              "teamtotal": "team_total", "tm": "team"})
+    if not {"team", "spread", "total"} <= set(raw.columns):
+        raise ValueError("Lines file needs columns: team, spread, total (optional team_total)")
+    opp_of = players.drop_duplicates("team").set_index("team")["opp"].to_dict()
+    rows = {}
+    for r in raw.itertuples():
+        team = normalize_abbr(r.team)
+        total, spread = float(r.total), float(r.spread)
+        tt = getattr(r, "team_total", np.nan)
+        tt = float(tt) if pd.notna(tt) else total / 2 - spread / 2
+        rows[team] = {"team": team, "game_total": total, "spread": spread, "team_total": tt}
+        opp = opp_of.get(team)
+        if opp and opp not in rows:
+            rows[opp] = {"team": opp, "game_total": total, "spread": -spread,
+                         "team_total": total - tt}
+    return pd.DataFrame(rows.values())
+
+
+def apply_lines(pool: pd.DataFrame, lines: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+    """Fill game_total / spread / team_total per team; returns (pool, teams with no line)."""
+    out = pool.copy()
+    by_team = lines.set_index("team")
+    for col in ("game_total", "spread", "team_total"):
+        out[col] = out["team"].map(by_team[col])
+    missing = sorted(set(out["team"]) - set(by_team.index))
+    return out, missing
+
+
 def pool_from_entry_file(ef: DKEntryFile, projections: pd.DataFrame | None = None
                          ) -> tuple[pd.DataFrame, list[str]]:
     """
     Engine player pool built from the entry file's player list. With
-    `projections` (columns: name, proj, and optionally team, position, own,
-    ceiling), those values are merged in; returns (pool, unmatched names
+    `projections` (name + projection columns, optionally team, position,
+    ownership, ceiling -- header names are flexible, see
+    `PROJECTION_ALIASES`), those values are merged in; returns (pool, unmatched names
     from `projections`). Vegas-line columns are left blank for sgo-enrich.
     """
     p = ef.players
@@ -157,10 +270,7 @@ def pool_from_entry_file(ef: DKEntryFile, projections: pd.DataFrame | None = Non
     })[POOL_COLUMNS]
     unmatched: list[str] = []
     if projections is not None:
-        proj = projections.copy()
-        proj.columns = [c.strip().lower() for c in proj.columns]
-        if not {"name", "proj"} <= set(proj.columns):
-            raise ValueError("Projections need at least `name` and `proj` columns")
+        proj = standardize_projection_columns(projections)
         idx = match_players(proj, p)
         unmatched = proj.loc[idx.isna(), "name"].astype(str).tolist()
         for col in ("proj", "own", "ceiling"):

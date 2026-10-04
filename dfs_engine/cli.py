@@ -293,14 +293,28 @@ def cmd_contest(args: argparse.Namespace) -> None:
 
 def cmd_dk_pool(args: argparse.Namespace) -> None:
     ef = dk.read_entry_file(args.entries)
-    projections = pd.read_csv(args.projections, encoding="utf-8-sig") if args.projections else None
+    projections = dk.read_projections(args.projections) if args.projections else None
+    if projections is not None:
+        print(f"Read {len(projections)} projection rows; columns used: {', '.join(projections.columns)}")
     pool, unmatched = dk.pool_from_entry_file(ef, projections)
+    if args.lines:
+        pool, no_line = dk.apply_lines(pool, dk.read_lines(args.lines, ef.players))
+        print(f"Vegas lines set for {pool['team'].nunique() - len(no_line)} of {pool['team'].nunique()} teams"
+              + (f"; missing: {', '.join(no_line)}" if no_line else ""))
     pool.to_csv(args.out, index=False)
     games = ef.players["game"].nunique()
     print(f"{len(ef.entries)} entries in {ef.entries['contest_id'].nunique()} contests; "
           f"{len(pool)} players across {games} games.")
     if projections is not None:
-        print(f"Projections matched for {int(pool['proj'].notna().sum())} players.")
+        hit = pool[pool["proj"].notna()]
+        print(f"Projections matched for {len(hit)} players "
+              f"({', '.join(f'{k} {v}' for k, v in hit['position'].value_counts().items())}).")
+        if "own" in projections.columns:
+            own = hit["own"].fillna(0)
+            total = own.sum() * (1 if own.max() > 1.5 else 100)
+            print(f"  ownership sums to {total:.0f}% (a full DK Classic slate should be ~900%)")
+        else:
+            print("  WARNING: no ownership column found -- the contest sim needs it.")
         if unmatched:
             print(f"  not on this slate / unmatched ({len(unmatched)}): {', '.join(unmatched[:25])}"
                   + (" ..." if len(unmatched) > 25 else ""))
@@ -576,7 +590,10 @@ def main() -> None:
     p_dkp = sub.add_parser("dk-pool", help="Player pool (with DK IDs) from a DraftKings entry file")
     p_dkp.add_argument("--entries", required=True, help="DKEntries.csv downloaded from DraftKings")
     p_dkp.add_argument("--projections", default=None,
-                       help="CSV with name, proj and optionally team, position, own, ceiling")
+                       help="projections CSV/TSV (or pasted table): player name + projection, "
+                            "optionally team, position, ownership, ceiling; headers are flexible")
+    p_dkp.add_argument("--lines", default=None,
+                       help="Vegas lines CSV: team, spread, total (one team per game is enough)")
     p_dkp.add_argument("--out", required=True)
     p_dkp.set_defaults(func=cmd_dk_pool)
 
