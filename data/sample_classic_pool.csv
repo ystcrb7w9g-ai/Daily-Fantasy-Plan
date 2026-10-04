@@ -1,0 +1,14 @@
+name,team,opp,position,salary,proj,own,ceiling,team_total,game_total,spread
+Josh Allen,BUF,MIA,QB,8200,24.5,0.18,38.0,27.5,51.0,-6.5
+Tua Tagovailoa,MIA,BUF,QB,6400,17.8,0.05,29.0,23.5,51.0,6.5
+James Cook,BUF,MIA,RB,7000,16.2,0.22,30.0,27.5,51.0,-6.5
+De'Von Achane,MIA,BUF,RB,7400,15.9,0.19,32.0,23.5,51.0,6.5
+Raheem Mostert,MIA,BUF,RB,4800,8.5,0.06,19.0,23.5,51.0,6.5
+Stefon Diggs,BUF,MIA,WR,7600,15.5,0.17,29.0,27.5,51.0,-6.5
+Tyreek Hill,MIA,BUF,WR,8400,17.2,0.24,33.0,23.5,51.0,6.5
+Khalil Shakir,BUF,MIA,WR,5200,10.1,0.09,22.0,27.5,51.0,-6.5
+Jaylen Waddle,MIA,BUF,WR,6800,13.4,0.14,26.0,23.5,51.0,6.5
+Dalton Kincaid,BUF,MIA,TE,5600,10.8,0.11,21.0,27.5,51.0,-6.5
+Durham Smythe,MIA,BUF,TE,2800,4.2,0.02,10.0,23.5,51.0,6.5
+Bills DST,BUF,MIA,DST,3200,7.5,0.08,16.0,27.5,51.0,-6.5
+Dolphins DST,MIA,BUF,DST,2600,6.1,0.04,14.0,23.5,51.0,6.5

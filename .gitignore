@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.npz
+.ipynb_checkpoints/
+/outputs/
+*.egg-info/
+.venv/
