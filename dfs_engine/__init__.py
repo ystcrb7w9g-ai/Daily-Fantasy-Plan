@@ -13,6 +13,8 @@ Modules:
     portfolio   -- build N lineups with exposure caps + uniqueness
     contest     -- candidate pool, field sim, contest sim, portfolio selection
     dk          -- DraftKings entry file parsing, slot assignment, upload export
+    history     -- field behavior learned from past contest-standings exports
+    ownership   -- ownership sanity checks + fallback estimator
     diagnostics -- Optimal% leverage diagnostic (SaberSim-style)
     sportsgameodds -- SportsGameOdds lines + prop-implied baseline projections
 """

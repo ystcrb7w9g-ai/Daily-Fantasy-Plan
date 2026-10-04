@@ -282,9 +282,13 @@ def _ids_to_weights(ids, captain, n_players):
     return w
 
 
-# Share of field lineups pairing the QB with 0 / 1 / 2+ of his own WR/TE.
-# Rough large-field NFL GPP tendencies; tune to the contest you play.
-DEFAULT_STACK_MIX = (0.25, 0.40, 0.35)
+# Share of field lineups pairing the QB with 0 / 1 / 2+ of his own WR/TE,
+# measured on three 2026 Millionaire Makers (data/field_profile.json).
+DEFAULT_STACK_MIX = (0.19, 0.53, 0.28)
+
+# Real Milly field scores at the top 0.1% / top 1% / top 20%, divided by
+# the median score (same source). Used to fit the simulation's spread.
+HISTORICAL_SCORE_RATIOS = (1.664, 1.512, 1.187)
 
 
 def _qb_stack_counts(ids: np.ndarray, df: pd.DataFrame) -> np.ndarray:
@@ -429,6 +433,59 @@ def generate_field(
         except RuntimeError:
             warnings.warn("Field ownership calibration hit an unsampleable state; backing off.")
     raise RuntimeError("Field sampler can't fill the field; lower min_salary or adjust stack_mix.")
+
+
+def field_score_ratios(field_w: np.ndarray, scores: np.ndarray) -> np.ndarray:
+    """Mean over sims of the field's top 0.1% / 1% / 20% score divided by its median."""
+    fs = scores.astype(np.float32) @ field_w.T
+    q = np.quantile(fs, [0.999, 0.99, 0.8, 0.5], axis=1)
+    return (q[:3] / q[3]).mean(axis=1)
+
+
+def calibrate_spread(
+    df: pd.DataFrame,
+    field_w: np.ndarray,
+    simulate,
+    target: tuple[float, float, float] = HISTORICAL_SCORE_RATIOS,
+    n_trials: int = 300,
+    bounds: tuple[float, float] = (0.2, 2.5),
+    n_iter: int = 8,
+    seed: int | None = 0,
+) -> tuple[float | None, np.ndarray, np.ndarray]:
+    """
+    Fit `spread_scale` (the default-ceiling width for players without a
+    ceiling) so the simulated field's score spread matches real
+    Millionaire Makers. `simulate(df, n_trials, seed, spread_scale)` must
+    return a score matrix. Returns (spread_scale, ratios at that scale,
+    target); spread_scale is None when every player has his own ceiling
+    (nothing to fit -- the ratios are then just a diagnostic).
+    """
+    target = np.asarray(target, dtype=float)
+    proj = df["proj"].to_numpy(dtype=float)
+    ceil = df["ceiling"].to_numpy(dtype=float) if "ceiling" in df.columns else np.full(len(df), np.nan)
+    if (np.isfinite(ceil) & (ceil > proj)).all():
+        return None, field_score_ratios(field_w, simulate(df, n_trials, seed, None)), target
+
+    def err(k):
+        r = field_score_ratios(field_w, simulate(df, n_trials, seed, k))
+        return float(np.mean(r / target) - 1.0), r
+
+    lo, hi = bounds
+    e_lo, r_lo = err(lo)
+    e_hi, r_hi = err(hi)
+    if e_lo >= 0:   # even the narrowest default is too wide (user ceilings dominate)
+        return lo, r_lo, target
+    if e_hi <= 0:
+        return hi, r_hi, target
+    r_mid = r_lo
+    for _ in range(n_iter):
+        mid = 0.5 * (lo + hi)
+        e_mid, r_mid = err(mid)
+        if e_mid < 0:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi), r_mid, target
 
 
 # ---------------------------------------------------------------------------

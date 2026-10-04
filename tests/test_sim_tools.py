@@ -63,12 +63,22 @@ def test_ceiling_calibration_preserves_correlation_structure():
     assert abs(c_raw - c_cal) < 0.08
 
 
-def test_ceiling_calibration_skips_missing_ceiling():
+def test_ceiling_calibration_skips_missing_ceiling_without_default():
     pool = load_player_pool(POOL_PATH)
     pool.loc[0, "ceiling"] = np.nan
-    a = simulate_player_scores(pool, n_trials=3000, seed=13)
+    a = simulate_player_scores(pool, n_trials=3000, seed=13, spread_scale=None)
     b = simulate_player_scores(pool, n_trials=3000, seed=13, calibrate_ceiling=False)
     assert np.allclose(a[:, 0], b[:, 0])
+
+
+def test_missing_ceiling_gets_position_default():
+    from dfs_engine.simulate import BASE_CEILING_MULT
+    pool = load_player_pool(POOL_PATH)
+    pool["ceiling"] = np.nan
+    for scale in (0.5, 1.0):
+        sc = simulate_player_scores(pool, n_trials=20000, seed=14, spread_scale=scale)
+        expect = pool["proj"] * (1 + scale * (pool["position"].map(BASE_CEILING_MULT) - 1))
+        assert np.allclose(np.percentile(sc, 85, axis=0) / expect, 1.0, atol=0.06)
 
 
 # --- outcomes report -------------------------------------------------------

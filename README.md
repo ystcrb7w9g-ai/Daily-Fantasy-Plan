@@ -37,9 +37,14 @@ shared, correlated factors — the same basic approach real sim-based tools
    so his simulated 85th percentile lands on the `ceiling` column while
    his mean stays on `proj` (Stokastic/SaberSim-style median + ceiling
    fitting). It's a per-player affine rescale, so the correlations from
-   steps 1–5 are preserved. Players without a usable ceiling keep the
-   default spread. Change the percentile with `--ceiling-pct`, or turn
-   it off with `--no-ceiling-calibration`.
+   steps 1–5 are preserved. Change the percentile with `--ceiling-pct`,
+   or turn it off with `--no-ceiling-calibration`.
+8. **Default ceilings fitted to real contests**: players without a
+   ceiling get a position default. Its width (`--spread-scale`) is chosen
+   so a simulated field's score spread matches three real 2026
+   Millionaire Makers: top 0.1% / top 1% / top 20% at 1.66× / 1.51× /
+   1.19× the median score. `contest` and `dk-run` re-fit it on every
+   slate.
 
 ## Install
 
@@ -246,6 +251,42 @@ Then upload `dk_upload.csv` on DraftKings' Edit Entries page.
   and those without ownership count as 0%. `dk-run` warns if most
   ownership is missing, since the simulated field depends on it.
 
+### Learning from past contests (`field-study`)
+
+DraftKings' contest-standings export (contest page → Export Lineups, a
+`contest-standings-<id>.csv`, often zipped) holds every entry's lineup
+and score, plus each player's actual `%Drafted` and points. `field-study`
+turns those files into `data/field_profile.json`:
+
+```bash
+python -m dfs_engine.cli field-study contest-standings-*.zip \
+    --entries DKEntries.csv --out data/field_profile.json
+```
+
+`--entries` supplies a current DraftKings player list, used to map names
+to teams for the stacking stats. The profile keeps aggregates only (no
+entries or usernames). From three 2026 Millionaire Makers (Weeks 1–3,
+162k–831k entries each):
+
+| Field behavior | Measured | Used for |
+|---|---|---|
+| Score at top 0.1% / 1% / 20% ÷ median | 1.66 / 1.51 / 1.19 | fitting the simulation's spread |
+| QB with 0 / 1 / 2+ of his own WR/TE | 19% / 53% / 28% | the field sampler's stack mix |
+| FLEX filled by RB / WR / TE | 42% / 33% / 25% | ownership position totals |
+| Most-owned RB / WR / TE / QB / DST | ~45% / 26% / 26% / 12% / 19% | ownership checks + estimator |
+| Entries in a duplicated lineup | 6–10% | known gap (see limitations) |
+
+**Ownership checks and fallback.** `dk-pool` and `dk-run` compare your
+ownership column to these real fields, rescaled to the slate's size. They
+flag totals far from 900% and positions that look too flat or too chalky.
+`dk-pool --estimate-own` fills missing ownership from a fallback model:
+players are ranked within each position by value, projection and team
+total, and the k-th ranked player gets the real fields' k-th-ranked
+ownership. `--own-blend 0.3` mixes 30% of that estimate into provided
+ownership. The exports contain no salaries or pre-lock projections, so
+the ranking weights are judgment, not fitted. Prefer a published
+ownership projection.
+
 ### Pull in SportsGameOdds lines + prop-based baseline projections
 
 [SportsGameOdds](https://sportsgameodds.com) aggregates sportsbook odds and
@@ -334,6 +375,8 @@ dfs_engine/
   outcomes.py     # per-player median/p85/p99/boom/bust/Optimal% report
   contest.py      # candidates, ownership-sampled field, contest sim, portfolio selection
   dk.py           # DraftKings entry file: parse, pool + projections merge, slots, upload
+  history.py      # contest-standings exports -> field profile (score spread, stacks, ownership)
+  ownership.py    # ownership sanity checks + fallback estimator from real-field curves
   portfolio.py    # N-lineup portfolio builder (exposure caps, uniqueness)
   diagnostics.py  # Optimal% leverage diagnostic
   sportsgameodds.py # SportsGameOdds fetch, game lines, prop -> DK baseline
@@ -344,10 +387,12 @@ tests/
   test_sim_tools.py  # ceiling calibration, outcomes report, stacking rules
   test_contest.py    # payouts, field sampler, contest sim, portfolio selection
   test_dk.py         # entry-file parsing, matching, DK roster rules, upload, dk-run end to end
+  test_history.py    # standings parsing, field profile, ownership estimator, spread fitting
   run_tests.py    # standalone runner (no pytest dependency)
 data/
   sample_classic_pool.csv
   sample_sgo_events.json  # SGO /events snapshot matching the sample pool
+  field_profile.json      # aggregate field behavior from three 2026 Millys
 ```
 
 ## Testing
@@ -370,6 +415,10 @@ python3 tests/run_tests.py
   projections come only from the SportsGameOdds prop baseline above. For
   best results supply your own `proj` (from a paid provider or your
   model) and use SGO as the market baseline to blend against.
+- **The simulated field duplicates too little.** Only ~1% of its entries
+  share a lineup, versus 6–10% in real Millys, where chalk and
+  optimizer-built lineups cluster. Prize splitting for chalky lineups is
+  therefore underestimated, which slightly favors chalk.
 - **Contest-sim ROI is optimistic in absolute terms.** The `contest`
   field is sampled from ownership with a stacking mix; it doesn't model
   the real field's skill or strategy distribution. Use simulated ROI /

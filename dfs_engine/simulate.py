@@ -30,7 +30,10 @@ noise:
    while his mean stays on `proj` -- the way Stokastic/SaberSim fit each
    distribution to a median + ceiling. A per-player affine rescale leaves
    pairwise correlations unchanged, so the game/team structure is kept.
-   Players with no usable ceiling keep the default spread from steps 5-6.
+   Players with no usable ceiling get a position-default ceiling
+   (`fill_default_ceilings`, scaled by `spread_scale`), fitted so the
+   simulated field's score spread matches real Millionaire Makers; pass
+   `spread_scale=None` to leave them on the raw spread from steps 5-6.
 
 The output is a (n_trials, n_players) array of simulated fantasy points.
 """
@@ -63,6 +66,24 @@ def qb_variance_multiplier(salary: pd.Series) -> pd.Series:
     return mult.fillna(1.00)
 
 
+# Default ceiling (85th percentile) as a multiple of projection, for players
+# whose `ceiling` is missing: proj * (1 + spread_scale * (mult - 1)). The
+# scale 0.85 makes a simulated, ownership-sampled field's score spread
+# (top 0.1% / 1% / 20% vs median) match three real 2026 Millionaire Makers
+# (data/field_profile.json); `contest` / `dk-run` re-fit it per slate.
+BASE_CEILING_MULT = {"QB": 1.55, "RB": 1.85, "WR": 1.90, "TE": 1.90, "DST": 2.00}
+DEFAULT_SPREAD_SCALE = 0.85
+
+
+def fill_default_ceilings(ceiling: np.ndarray, proj: np.ndarray, position: pd.Series,
+                          spread_scale: float = DEFAULT_SPREAD_SCALE) -> np.ndarray:
+    """Replace missing / non-usable ceilings (not above proj) with the scaled position default."""
+    mult = position.map(BASE_CEILING_MULT).fillna(1.85).to_numpy(dtype=float)
+    default = proj * (1.0 + spread_scale * (mult - 1.0))
+    usable = np.isfinite(ceiling) & (ceiling > proj)
+    return np.where(usable, ceiling, default)
+
+
 def simulate_player_scores(
     df: pd.DataFrame,
     n_trials: int = 50_000,
@@ -74,6 +95,7 @@ def simulate_player_scores(
     residual_sd_frac: float = 0.32,
     calibrate_ceiling: bool = True,
     ceiling_pct: float = 0.85,
+    spread_scale: float | None = DEFAULT_SPREAD_SCALE,
 ) -> np.ndarray:
     """
     Simulate fantasy points for every player in `df` across `n_trials`
@@ -179,10 +201,12 @@ def simulate_player_scores(
     ) * noise_sd
 
     scores = mean_component + noise_component
-    if calibrate_ceiling and "ceiling" in df.columns:
-        scale, shift = ceiling_calibration(
-            scores, df["ceiling"].to_numpy(dtype=float), proj, ceiling_pct,
-        )
+    if calibrate_ceiling:
+        ceiling = (df["ceiling"].to_numpy(dtype=float) if "ceiling" in df.columns
+                   else np.full(n_players, np.nan))
+        if spread_scale is not None:
+            ceiling = fill_default_ceilings(ceiling, proj, df["position"], spread_scale)
+        scale, shift = ceiling_calibration(scores, ceiling, proj, ceiling_pct)
         scores = proj[None, :] + shift[None, :] + scale[None, :] * (scores - proj[None, :])
 
     scores = np.clip(scores, 0.0, None)

@@ -56,11 +56,13 @@ import numpy as np
 import pandas as pd
 
 from .data import load_player_pool, validate_showdown_pool
-from .simulate import simulate_player_scores
+from .simulate import DEFAULT_SPREAD_SCALE, simulate_player_scores
 from .optimize import StackRules
 from .outcomes import player_outcomes
 from . import contest as cs
 from . import dk
+from . import history
+from . import ownership
 from .portfolio import build_portfolio, exposure_report
 from .diagnostics import run_optimal_pct_chunk, leverage_report
 from . import sportsgameodds as sgo
@@ -101,10 +103,28 @@ def _stack_rules(args: argparse.Namespace) -> StackRules | None:
 
 
 def _simulate(df: pd.DataFrame, args: argparse.Namespace, n_trials: int, seed) -> np.ndarray:
+    spread = args.spread_scale if args.spread_scale is not None else DEFAULT_SPREAD_SCALE
     return simulate_player_scores(
         df, n_trials=n_trials, seed=seed,
         calibrate_ceiling=not args.no_ceiling_calibration, ceiling_pct=args.ceiling_pct,
+        spread_scale=spread,
     )
+
+
+def _fit_spread(df: pd.DataFrame, field: np.ndarray, args: argparse.Namespace) -> None:
+    """Fit default-ceiling width so the field's score spread matches real Millys (unless fixed)."""
+    if args.spread_scale is not None or args.no_ceiling_calibration:
+        return
+    sim = lambda d, n, seed, k: simulate_player_scores(  # noqa: E731
+        d, n_trials=n, seed=seed, ceiling_pct=args.ceiling_pct, spread_scale=k)
+    k, ratios, target = cs.calibrate_spread(df, field, sim)
+    fmt = lambda r: "/".join(f"{x:.2f}" for x in r)  # noqa: E731
+    if k is None:
+        print(f"  field score spread (top0.1%/top1%/top20% vs median): sim {fmt(ratios)}, "
+              f"real Millys {fmt(target)} -- all players have ceilings, nothing to fit")
+        return
+    args.spread_scale = k
+    print(f"  fitted spread_scale={k:.2f}: field score spread sim {fmt(ratios)} vs real Millys {fmt(target)}")
 
 
 def _add_sim_args(p: argparse.ArgumentParser) -> None:
@@ -112,6 +132,9 @@ def _add_sim_args(p: argparse.ArgumentParser) -> None:
                    help="percentile the `ceiling` column represents (calibrates each player's spread)")
     p.add_argument("--no-ceiling-calibration", action="store_true",
                    help="ignore `ceiling` and use the default fixed-fraction spread")
+    p.add_argument("--spread-scale", type=float, default=None,
+                   help="width of default ceilings for players without one (default: fitted to "
+                        "real Milly score spreads in contest/dk-run, %.2f elsewhere)" % DEFAULT_SPREAD_SCALE)
 
 
 def _add_stack_args(p: argparse.ArgumentParser) -> None:
@@ -226,6 +249,13 @@ def cmd_contest(args: argparse.Namespace) -> None:
 
     # Candidates and grading use independent sims so lineups aren't graded
     # on the same outcomes they were optimized for.
+    print(f"Sampling a {args.field_size:,}-lineup field from ownership...")
+    field = cs.generate_field(
+        df, args.field_size, fmt=args.fmt, min_salary=args.field_min_salary,
+        stack_mix=_parse_stack_mix(args.field_stack_mix), seed=None if seed is None else seed + 2,
+    )
+    _fit_spread(df, field, args)
+
     print(f"Simulating {args.gen_trials} generation + {args.eval_trials} evaluation "
           f"+ {args.holdout_trials} holdout trials...")
     gen_scores = _simulate(df, args, args.gen_trials, seed)
@@ -238,12 +268,6 @@ def cmd_contest(args: argparse.Namespace) -> None:
         seed=seed, progress=True,
     )
     print(f"  {len(candidates)} distinct candidates")
-
-    print(f"Sampling a {args.field_size:,}-lineup field from ownership...")
-    field = cs.generate_field(
-        df, args.field_size, fmt=args.fmt, min_salary=args.field_min_salary,
-        stack_mix=_parse_stack_mix(args.field_stack_mix), seed=None if seed is None else seed + 2,
-    )
 
     print("Simulating contest...")
     cand_w = cs.lineups_to_weights(candidates, len(df))
@@ -297,10 +321,26 @@ def cmd_dk_pool(args: argparse.Namespace) -> None:
     if projections is not None:
         print(f"Read {len(projections)} projection rows; columns used: {', '.join(projections.columns)}")
     pool, unmatched = dk.pool_from_entry_file(ef, projections)
+    if args.estimate_own or args.own_blend:
+        est = ownership.estimate_ownership(pool)
+        given = pd.to_numeric(pool["own"], errors="coerce")
+        given = given / 100.0 if given.max() > 1.5 else given
+        if args.own_blend:
+            blended = (1 - args.own_blend) * given + args.own_blend * est
+            pool["own"] = blended.where(given.notna(), est if args.estimate_own else given)
+            print(f"Blended ownership: {args.own_blend:.0%} estimate / {1 - args.own_blend:.0%} provided")
+        else:
+            pool["own"] = given.where(given.notna(), est)
+            print(f"Estimated ownership for {int(given.isna().sum())} players without one "
+                  "(value-ranked, real-Milly concentration curves)")
+        pool.loc[pool["proj"].isna(), "own"] = np.nan
     if args.lines:
         pool, no_line = dk.apply_lines(pool, dk.read_lines(args.lines, ef.players))
         print(f"Vegas lines set for {pool['team'].nunique() - len(no_line)} of {pool['team'].nunique()} teams"
               + (f"; missing: {', '.join(no_line)}" if no_line else ""))
+    if pool["own"].notna().any():
+        for note in ownership.check_ownership(pool[pool["proj"].notna()]):
+            print(f"  ownership check: {note}")
     pool.to_csv(args.out, index=False)
     games = ef.players["game"].nunique()
     print(f"{len(ef.entries)} entries in {ef.entries['contest_id'].nunique()} contests; "
@@ -309,7 +349,7 @@ def cmd_dk_pool(args: argparse.Namespace) -> None:
         hit = pool[pool["proj"].notna()]
         print(f"Projections matched for {len(hit)} players "
               f"({', '.join(f'{k} {v}' for k, v in hit['position'].value_counts().items())}).")
-        if "own" in projections.columns:
+        if hit["own"].notna().any():
             own = hit["own"].fillna(0)
             total = own.sum() * (1 if own.max() > 1.5 else 100)
             print(f"  ownership sums to {total:.0f}% (a full DK Classic slate should be ~900%)")
@@ -372,6 +412,8 @@ def cmd_dk_run(args: argparse.Namespace) -> None:
         df = df[df["dk_id"].notna()].reset_index(drop=True)
         df["player_id"] = df.index
     df["dk_id"] = pd.to_numeric(df["dk_id"]).astype("int64").astype(str)
+    for note in ownership.check_ownership(df):
+        print(f"ownership check: {note}")
     if (df["own"] <= 0).mean() > 0.5:
         print("WARNING: most players have no ownership projection -- the simulated field "
               "(and therefore ROI) will be close to meaningless. Supply `own`.")
@@ -383,6 +425,11 @@ def cmd_dk_run(args: argparse.Namespace) -> None:
 
     seed = args.seed
     sub_seed = (lambda k: None) if seed is None else (lambda k: seed + k)
+    print(f"Sampling a {args.field_size:,}-lineup field from ownership...")
+    field = cs.generate_field(df, args.field_size, min_salary=args.field_min_salary,
+                              stack_mix=_parse_stack_mix(args.field_stack_mix), seed=sub_seed(2))
+    _fit_spread(df, field, args)
+
     print(f"Simulating {args.gen_trials} + {args.eval_trials} + {args.holdout_trials} trials...")
     gen_scores = _simulate(df, args, args.gen_trials, seed)
     eval_scores = _simulate(df, args, args.eval_trials, sub_seed(1))
@@ -392,9 +439,6 @@ def cmd_dk_run(args: argparse.Namespace) -> None:
     print(f"Generating {n_cand} candidate lineups...")
     candidates = cs.generate_candidates(df, gen_scores, n_cand, stack_rules=rules,
                                         seed=seed, progress=True)
-    print(f"Sampling a {args.field_size:,}-lineup field from ownership...")
-    field = cs.generate_field(df, args.field_size, min_salary=args.field_min_salary,
-                              stack_mix=_parse_stack_mix(args.field_stack_mix), seed=sub_seed(2))
     cand_w = cs.lineups_to_weights(candidates, len(df))
     print("Ranking candidates against the field...")
     ranks = cs.rank_against_field(cand_w, field, eval_scores)
@@ -449,6 +493,28 @@ def cmd_dk_run(args: argparse.Namespace) -> None:
         exp_df["field_own"] = exp_df["name"].map(pd.Series((field > 0).mean(axis=0), index=df["name"])).round(4)
         exp_df.to_csv(args.exposure_out, index=False)
         print(f"Wrote exposure report to {args.exposure_out}")
+
+
+def cmd_field_study(args: argparse.Namespace) -> None:
+    team_of = None
+    if args.entries:
+        ef = dk.read_entry_file(args.entries)
+        team_of = {sgo.normalize_name(n): t for n, t, p in
+                   zip(ef.players["name"], ef.players["team"], ef.players["position"]) if p != "DST"}
+    profiles = []
+    for path in args.standings:
+        print(f"Reading {path} ...")
+        p = history.profile_standings(path, team_of)
+        profiles.append(p)
+        mix = p.get("qb_stack_mix")
+        print(f"  {p['entries']:,} entries | 1st {p['score_first']:.1f}, top 1% {p['score_top1']:.1f}, "
+              f"median {p['score_median']:.1f} | top1%/median {p['ratio_top1']:.3f} | "
+              f"in dupes {p['entries_in_duplicates']:.1%}"
+              + (f" | QB+0/1/2+ {'/'.join(f'{x:.0%}' for x in mix)}" if mix else ""))
+    combined = history.combine_profiles(profiles)
+    combined["per_contest"] = [{k: v for k, v in p.items() if k != "own_curves"} for p in profiles]
+    history.save_profile(combined, args.out)
+    print(f"Wrote field profile to {args.out}")
 
 
 def _fetch_sgo(args: argparse.Namespace) -> list[dict]:
@@ -592,6 +658,10 @@ def main() -> None:
     p_dkp.add_argument("--projections", default=None,
                        help="projections CSV/TSV (or pasted table): player name + projection, "
                             "optionally team, position, ownership, ceiling; headers are flexible")
+    p_dkp.add_argument("--estimate-own", action="store_true",
+                       help="estimate ownership for players without one (fallback model)")
+    p_dkp.add_argument("--own-blend", type=float, default=0.0,
+                       help="blend this share of the estimate into provided ownership (0-1)")
     p_dkp.add_argument("--lines", default=None,
                        help="Vegas lines CSV: team, spread, total (one team per game is enough)")
     p_dkp.add_argument("--out", required=True)
@@ -628,6 +698,13 @@ def main() -> None:
     _add_sim_args(p_dkr)
     _add_stack_args(p_dkr)
     p_dkr.set_defaults(func=cmd_dk_run)
+
+    p_fs = sub.add_parser("field-study", help="Profile past contest-standings exports (field behavior)")
+    p_fs.add_argument("standings", nargs="+", help="contest-standings CSV or ZIP files")
+    p_fs.add_argument("--entries", default=None,
+                      help="a DKEntries.csv whose player list maps names to teams (for stack mix)")
+    p_fs.add_argument("--out", default="data/field_profile.json")
+    p_fs.set_defaults(func=cmd_field_study)
 
     p_fetch = sub.add_parser("sgo-fetch", help="Download SportsGameOdds events (lines + props) to JSON")
     _add_sgo_fetch_args(p_fetch)
