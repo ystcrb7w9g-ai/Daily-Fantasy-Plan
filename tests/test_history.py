@@ -163,3 +163,31 @@ def test_evaluate_ownership_scores_projection_file():
     assert r["matched"] == 4 and r["unmatched"] == 1
     assert r["own_corr"] > 0.9 and abs(r["own_mae"] - 0.05) < 1e-9
     assert r["gamma_mae"][1.3] < r["gamma_mae"][1.0]  # under-projected chalk -> sharpening helps
+
+
+def test_fit_ownership_model_recovers_value_driven_ownership():
+    rng = np.random.default_rng(0)
+    weeks = []
+    for w in range(3):
+        df = _value_owned_pool(seed=w)[["name", "position", "salary", "proj"]].copy()
+        X = ownership.model_features(df)
+        true = np.exp(-3.0 + 1.0 * X["value"].astype(float) + rng.normal(0, 0.1, len(df)))
+        weeks.append(df.assign(actual_own=true))
+    model = ownership.fit_ownership_model(weeks)
+    assert set(model) == {"QB", "RB", "WR", "TE", "DST"}
+    test = _value_owned_pool(seed=9)
+    prof = history.load_profile(os.path.join(ROOT, "data", "field_profile.json"))
+    est = ownership.estimate_ownership(test, dict(prof, own_model=model))
+    value = test["proj"] / test["salary"]
+    for p in ("RB", "WR"):
+        k = test["position"] == p
+        assert np.corrcoef(est[k], value[k])[0, 1] > 0.8
+        assert abs(est[k].sum() - ownership.position_totals(prof)[p]) < 0.02
+
+
+def test_estimate_ownership_falls_back_to_curves_without_model():
+    prof = history.load_profile(os.path.join(ROOT, "data", "field_profile.json"))
+    prof.pop("own_model", None)
+    df = _value_owned_pool()
+    est = ownership.estimate_ownership(df, prof)
+    assert abs(est[df["position"] == "QB"].sum() - 1.0) < 0.02

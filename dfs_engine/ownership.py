@@ -10,13 +10,12 @@ from DraftKings contest-standings exports).
   curves and flags what looks off (totals not near 900%, a position far
   flatter or chalkier than real fields).
 * `estimate_ownership` is a fallback when no ownership projection is
-  available: rank players within each position by a value score
-  (points per $1k, projection, team implied total) and give the k-th
-  ranked player the real fields' k-th-ranked ownership, rescaled to the
-  slate. It captures how concentrated ownership is, but not news or
-  narrative, and the value score's weights are judgment, not fitted
-  (the contest exports have no salaries or pre-lock projections) -- a
-  published projection should be preferred, or blended with this.
+  available: a per-position log-linear model of ownership on points per
+  $1k, projection and salary, fitted to real %Drafted (`own-fit`; shipped
+  fit: 2026 Weeks 1-3). Without a fitted model it ranks players by a
+  value score onto the real fields' ownership curves. It misses news and
+  narrative: on held-out weeks it reached corr ~0.65 vs ~0.87 for a
+  published projection (GoingFor2), and blending it in made that worse.
 """
 from __future__ import annotations
 
@@ -58,12 +57,61 @@ def value_score(df: pd.DataFrame) -> pd.Series:
     return out
 
 
+MODEL_FEATURES = ("value", "proj", "salary")
+
+
+def model_features(df: pd.DataFrame, group_cols=("position",)) -> pd.DataFrame:
+    """Within-group z-scores of points per $1k, projection and salary."""
+    X = pd.DataFrame(index=df.index, columns=list(MODEL_FEATURES), dtype=float)
+    for _, g in df.groupby(list(group_cols)):
+        X.loc[g.index, "value"] = _zscore(g["proj"] / (g["salary"] / 1000.0))
+        X.loc[g.index, "proj"] = _zscore(g["proj"])
+        X.loc[g.index, "salary"] = _zscore(g["salary"].astype(float))
+    return X
+
+
+def fit_ownership_model(weeks: list[pd.DataFrame]) -> dict:
+    """
+    Fit log(actual ownership) ~ value + projection + salary per position
+    (least squares) on past weeks. Each frame needs name, position, salary,
+    proj and `actual_own` (fraction). Returns {position: {intercept, value,
+    proj, salary}} for `estimate_ownership`.
+    """
+    d = pd.concat([w.assign(_week=i) for i, w in enumerate(weeks)], ignore_index=True)
+    d = d[d["proj"].notna() & (d["proj"] > 0) & d["salary"].notna()]
+    X = model_features(d, ("_week", "position"))
+    model = {}
+    for p, g in d.groupby("position"):
+        A = np.column_stack([np.ones(len(g)), X.loc[g.index, list(MODEL_FEATURES)].to_numpy(float)])
+        b = np.linalg.lstsq(A, np.log(g["actual_own"].clip(lower=0.002)), rcond=None)[0]
+        model[p] = {"intercept": float(b[0]), **{f: float(c) for f, c in zip(MODEL_FEATURES, b[1:])},
+                    "n": int(len(g))}
+    return model
+
+
 def estimate_ownership(df: pd.DataFrame, profile: dict | None = None) -> pd.Series:
-    """Fraction-owned estimate per player (players without a projection get 0)."""
+    """
+    Fraction-owned estimate per player (players without a projection get 0).
+    Uses the fitted per-position model in the profile (`own_model`, from
+    `own-fit`) when present, else ranks by `value_score` onto the real-field
+    ownership curves. Either way each position is rescaled to its expected
+    total (base slots + FLEX share).
+    """
     prof = _profile(profile)
     totals = position_totals(prof)
     own = pd.Series(0.0, index=df.index)
     has_proj = df["proj"].notna() & (df["proj"] > 0)
+    model = prof.get("own_model")
+    if model:
+        d = df[has_proj]
+        X = model_features(d)
+        for p, g in d.groupby("position"):
+            c = model.get(p)
+            if c is None:
+                continue
+            raw = np.exp(c["intercept"] + sum(c[f] * X.loc[g.index, f].astype(float) for f in MODEL_FEATURES))
+            own[g.index] = raw / raw.sum() * totals.get(p, 1.0)
+        return own.clip(upper=0.95)
     score = value_score(df[has_proj])
     for p in POSITIONS:
         idx = score[df.loc[has_proj, "position"] == p].sort_values(ascending=False).index
@@ -134,8 +182,15 @@ def evaluate_ownership(proj: pd.DataFrame, actual: pd.DataFrame,
     """
     from .sportsgameodds import normalize_name
 
-    a = actual.assign(_k=actual["name"].map(normalize_name)).drop_duplicates("_k").set_index("_k")
-    p = proj.assign(_k=proj["name"].map(normalize_name))
+    def key(name, pos):
+        # DSTs: "Detroit Lions" in projection files vs "Lions" in DK exports -> nickname
+        k = normalize_name(name)
+        return "DST|" + k.split()[-1] if str(pos).upper() in ("DST", "DEF", "D") and k else k
+
+    a_pos = actual["position"] if "position" in actual else pd.Series("", index=actual.index)
+    a = actual.assign(_k=[key(n, ps) for n, ps in zip(actual["name"], a_pos)])
+    a = a.drop_duplicates("_k").set_index("_k")
+    p = proj.assign(_k=[key(n, ps) for n, ps in zip(proj["name"], proj.get("position", ""))])
     p = p[p["_k"].isin(a.index)].copy()
     p["actual_own"] = p["_k"].map(a["own"])
     p["actual_fpts"] = p["_k"].map(a["fpts"])

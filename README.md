@@ -280,13 +280,11 @@ entries or usernames). From three 2026 Millionaire Makers (Weeks 1–3,
 ownership column to these real fields, rescaled to the slate's size. They
 flag totals far from 900% and positions that look too flat or too chalky.
 `dk-pool --estimate-own` fills missing ownership from a fallback model:
-players are ranked within each position by value, projection and team
-total, and the k-th ranked player gets the real fields' k-th-ranked
-ownership. `--own-blend 0.3` mixes 30% of that estimate into provided
-ownership, and `--own-sharpen 1.2` makes the provided chalk chalkier. The
-exports contain no salaries or pre-lock projections, so the ranking
-weights are judgment, not fitted. Prefer a published ownership
-projection; see `own-eval` below for how they compared on Week 2.
+a per-position model fitted to real %Drafted (see `own-fit` below).
+`--own-blend 0.3` mixes 30% of that estimate into provided ownership, and
+`--own-sharpen 1.2` makes the provided chalk chalkier. Over three scored
+weeks, neither improved a published projection, so both are off by
+default.
 
 ### Scoring an ownership source (`own-eval`)
 
@@ -300,20 +298,32 @@ results. It reports ownership correlation and average error (overall and
 by position), projection bias, and the error at several chalk-sharpening
 settings.
 
-On Week 2 of 2026 (148 players, GoingFor2-based file):
-- **Ownership:** correlation 0.85, average error 2.5 points, well
-  calibrated, but the heaviest chalk was under-projected (Bijan 38% vs
-  47% actual).
-- **Sharpening:** `--own-sharpen 1.2` lowered the error slightly (2.48 →
-  2.42) and held up when each position was left out in turn (4 of 5).
-- **Our fallback estimator:** clearly worse (correlation 0.58), and every
-  blend into GoingFor2 made it worse. Keep `--own-blend` at 0 when a real
-  ownership projection is available.
-- **Projections vs actual points:** correlation 0.55; RBs ran +3.3 points
-  and QBs +2.3 points high.
+Results for 2026 Weeks 1–3 (140–151 players per week, GoingFor2-based files):
 
-One week is a small sample; score more weeks before trusting these
-settings.
+| | Week 1 | Week 2 | Week 3 |
+|---|---|---|---|
+| Ownership correlation / avg error | 0.90 / 2.0 pts | 0.85 / 2.5 | 0.85 / 2.4 |
+| Projection vs actual points (correlation) | 0.54 | 0.55 | 0.57 |
+| RB projection bias | −3.8 | +3.3 | +0.6 |
+
+- **Use GoingFor2 ownership as-is.** Chalk sharpening helped Weeks 2–3 but
+  hurt Week 1, so over three weeks `--own-sharpen 1.0` (off) is best.
+  A fitted correction on top of GoingFor2 also made it slightly worse.
+- **Projection biases flip sign week to week,** so there's nothing
+  consistent to correct.
+- **Fallback ownership model.** `own-fit` fits it per position to real
+  %Drafted from points per $1k, projection and salary; the shipped fit
+  uses Weeks 1–3. Predicting a held-out week, it reaches correlation
+  ~0.65 / avg error 3.4 pts, versus 0.54 / 4.2 for the curve-only
+  estimator and 0.87 / 2.3 for GoingFor2. Use it only when there's no
+  published ownership. Refit as weeks accumulate:
+
+```bash
+python -m dfs_engine.cli own-fit \
+    --week week1_projections.csv contest-standings-<w1>.zip \
+    --week week2_projections.csv contest-standings-<w2>.zip \
+    --week week3_projections.csv contest-standings-<w3>.zip
+```
 
 ### Pull in SportsGameOdds lines + prop-based baseline projections
 

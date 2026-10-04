@@ -539,6 +539,34 @@ def cmd_own_eval(args: argparse.Namespace) -> None:
           + ", ".join(f"{g}: {e:.2%}" for g, e in r["gamma_mae"].items()) + f"  -> best {best}")
 
 
+def _week_actuals(proj_path: str, standings_path: str) -> pd.DataFrame:
+    """A projections file joined to that week's actual %Drafted (DST matched by nickname)."""
+    proj = dk.read_projections(proj_path)
+    actual = history.player_table(history.read_standings(standings_path))
+    key = lambda n, ps: ("DST|" + sgo.normalize_name(n).split()[-1]) if str(ps).upper() == "DST" \
+        else sgo.normalize_name(n)  # noqa: E731
+    a = actual.assign(_k=[key(n, ps) for n, ps in zip(actual["name"], actual["position"])])
+    proj["_k"] = [key(n, ps) for n, ps in zip(proj["name"], proj.get("position", ""))]
+    return proj.merge(a.drop_duplicates("_k")[["_k", "own"]].rename(columns={"own": "actual_own"}), on="_k")
+
+
+def cmd_own_fit(args: argparse.Namespace) -> None:
+    weeks = []
+    for proj_path, standings_path in args.week:
+        w = _week_actuals(proj_path, standings_path)
+        if "salary" not in w.columns:
+            raise SystemExit(f"{proj_path} has no salary column (needed for the model)")
+        weeks.append(w)
+        print(f"{proj_path}: {len(w)} players matched to {standings_path}")
+    model = ownership.fit_ownership_model(weeks)
+    prof = history.load_profile(args.profile)
+    prof["own_model"] = model
+    history.save_profile(prof, args.profile)
+    for p, c in model.items():
+        print(f"  {p:<3} n={c['n']:<3} value {c['value']:+.2f}  proj {c['proj']:+.2f}  salary {c['salary']:+.2f}")
+    print(f"Saved ownership model to {args.profile}")
+
+
 def _fetch_sgo(args: argparse.Namespace) -> list[dict]:
     events = sgo.fetch_events(
         api_key=args.api_key, league_id=args.league,
@@ -735,6 +763,12 @@ def main() -> None:
     p_oe.add_argument("--projections", required=True, help="that week's projections/ownership file")
     p_oe.add_argument("--standings", required=True, help="that week's contest-standings CSV/ZIP")
     p_oe.set_defaults(func=cmd_own_eval)
+
+    p_of = sub.add_parser("own-fit", help="Fit the fallback ownership model to past weeks' actual %%Drafted")
+    p_of.add_argument("--week", nargs=2, action="append", required=True, metavar=("PROJECTIONS", "STANDINGS"),
+                      help="a week's projections file (with salary) and its contest-standings CSV/ZIP; repeat")
+    p_of.add_argument("--profile", default=str(ownership.PROFILE_PATH))
+    p_of.set_defaults(func=cmd_own_fit)
 
     p_fetch = sub.add_parser("sgo-fetch", help="Download SportsGameOdds events (lines + props) to JSON")
     _add_sgo_fetch_args(p_fetch)
