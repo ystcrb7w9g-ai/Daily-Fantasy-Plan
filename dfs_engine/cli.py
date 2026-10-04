@@ -221,6 +221,24 @@ def cmd_outcomes(args: argparse.Namespace) -> None:
     print(f"Wrote player outcome report to {args.out}")
 
 
+def _optimizer_kwargs(args: argparse.Namespace) -> dict:
+    if args.field_optimizer_share > 0:
+        print(f"  optimizer slice: {args.field_optimizer_share:.0%} of the field from "
+              f"{args.field_optimizer_solves} noisy optimizer solves (duplicates like real Millys)")
+    return {"optimizer_share": args.field_optimizer_share,
+            "optimizer_solves": args.field_optimizer_solves,
+            "optimizer_noise": args.field_optimizer_noise}
+
+
+def _add_field_optimizer_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--field-optimizer-share", type=float, default=cs.DEFAULT_OPTIMIZER_SHARE,
+                   help="share of the field built by noisy optimizer solves, which duplicate "
+                        "like real fields (0 = ownership sampling only)")
+    p.add_argument("--field-optimizer-solves", type=int, default=500)
+    p.add_argument("--field-optimizer-noise", type=float, default=cs.DEFAULT_OPTIMIZER_NOISE,
+                   help="lognormal sd of projection noise per solve (lower = more duplication)")
+
+
 def _parse_stack_mix(text: str):
     if text.strip().lower() == "none":
         return None
@@ -253,6 +271,7 @@ def cmd_contest(args: argparse.Namespace) -> None:
     field = cs.generate_field(
         df, args.field_size, fmt=args.fmt, min_salary=args.field_min_salary,
         stack_mix=_parse_stack_mix(args.field_stack_mix), seed=None if seed is None else seed + 2,
+        **_optimizer_kwargs(args),
     )
     _fit_spread(df, field, args)
 
@@ -431,7 +450,8 @@ def cmd_dk_run(args: argparse.Namespace) -> None:
     sub_seed = (lambda k: None) if seed is None else (lambda k: seed + k)
     print(f"Sampling a {args.field_size:,}-lineup field from ownership...")
     field = cs.generate_field(df, args.field_size, min_salary=args.field_min_salary,
-                              stack_mix=_parse_stack_mix(args.field_stack_mix), seed=sub_seed(2))
+                              stack_mix=_parse_stack_mix(args.field_stack_mix), seed=sub_seed(2),
+                              **_optimizer_kwargs(args))
     _fit_spread(df, field, args)
 
     print(f"Simulating {args.gen_trials} + {args.eval_trials} + {args.holdout_trials} trials...")
@@ -701,6 +721,7 @@ def main() -> None:
     p_con.add_argument("--exposure-out", default=None)
     _add_sim_args(p_con)
     _add_stack_args(p_con)
+    _add_field_optimizer_args(p_con)
     p_con.set_defaults(func=cmd_contest)
 
     p_dkp = sub.add_parser("dk-pool", help="Player pool (with DK IDs) from a DraftKings entry file")
@@ -750,6 +771,7 @@ def main() -> None:
     p_dkr.add_argument("--fmt", default="classic", help=argparse.SUPPRESS)
     _add_sim_args(p_dkr)
     _add_stack_args(p_dkr)
+    _add_field_optimizer_args(p_dkr)
     p_dkr.set_defaults(func=cmd_dk_run)
 
     p_fs = sub.add_parser("field-study", help="Profile past contest-standings exports (field behavior)")

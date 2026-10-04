@@ -286,6 +286,13 @@ def _ids_to_weights(ids, captain, n_players):
 # measured on three 2026 Millionaire Makers (data/field_profile.json).
 DEFAULT_STACK_MIX = (0.19, 0.53, 0.28)
 
+# Optimizer slice of the simulated field: share of entries and projection
+# noise chosen so a 165k-entry simulated Milly duplicates like the real
+# ones (6.7% of entries in duplicated lineups, top lineup ~60-140 copies,
+# vs 5.7-10.2% and 69-346 in 2026 Weeks 1-3; data/field_profile.json).
+DEFAULT_OPTIMIZER_SHARE = 0.06
+DEFAULT_OPTIMIZER_NOISE = 0.18
+
 # Real Milly field scores at the top 0.1% / top 1% / top 20%, divided by
 # the median score (same source). Used to fit the simulation's spread.
 HISTORICAL_SCORE_RATIOS = (1.664, 1.512, 1.187)
@@ -327,10 +334,22 @@ def generate_field(
     calibration_rounds: int = 5,
     seed: int | None = None,
     batch: int = 8192,
+    optimizer_share: float = 0.0,
+    optimizer_solves: int = 500,
+    optimizer_noise: float = DEFAULT_OPTIMIZER_NOISE,
 ) -> np.ndarray:
     """
-    Ownership-sampled opponent lineups as a (n_field, n_players) weight
-    matrix (same layout as `lineups_to_weights`).
+    Simulated opponent lineups as a (n_field, n_players) weight matrix
+    (same layout as `lineups_to_weights`).
+
+    - `optimizer_share` of the field is an "optimizer slice": lineups that
+      are MILP-optimal for the projections times lognormal noise
+      (`optimizer_noise`, standing in for different users' projections),
+      solved `optimizer_solves` times, each appearing in proportion to how
+      often it came out optimal. Popular builds therefore repeat, which is
+      how real fields duplicate (see `DEFAULT_OPTIMIZER_SHARE`). The
+      ownership-sampled remainder is calibrated to the ownership left over,
+      so the whole field still matches `own`.
 
     - Every slot is drawn with probability proportional to a per-player
       weight; the last slot is restricted to players that keep the lineup
@@ -362,6 +381,19 @@ def generate_field(
                       "rescaling it for the field.")
     own = np.clip(own * roster / own.sum(), 1e-4, 0.95)
     salary = df["salary"].to_numpy(dtype=float)
+
+    opt_block = np.zeros((0, n_players), dtype=np.float32)
+    if optimizer_share > 0:
+        opt_w, opt_p = optimizer_slice(df, fmt, optimizer_solves, optimizer_noise, rng)
+        n_opt = int(round(optimizer_share * n_field))
+        counts = _largest_remainder(opt_p, n_opt)
+        opt_block = np.repeat(opt_w, counts, axis=0)
+        # The rest of the field gets whatever ownership the slice didn't use.
+        share = len(opt_block) / n_field
+        opt_own = (opt_p[:, None] * (opt_w > 0)).sum(axis=0)
+        own = np.clip((own - share * opt_own) / (1 - share), 1e-4, 0.95)
+        n_field = n_field - len(opt_block)
+
     use_mix = fmt == "classic" and stack_mix is not None
     if use_mix:
         mix = np.asarray(stack_mix, dtype=float)
@@ -429,10 +461,51 @@ def generate_field(
 
     for w in (weights, last_ok, own):
         try:
-            return sample(w, n_field)
+            rest = sample(w, n_field)
+            break
         except RuntimeError:
             warnings.warn("Field ownership calibration hit an unsampleable state; backing off.")
-    raise RuntimeError("Field sampler can't fill the field; lower min_salary or adjust stack_mix.")
+    else:
+        raise RuntimeError("Field sampler can't fill the field; lower min_salary or adjust stack_mix.")
+    if not len(opt_block):
+        return rest
+    out = np.concatenate([rest, opt_block])
+    return out[rng.permutation(len(out))]
+
+
+def _largest_remainder(p: np.ndarray, n: int) -> np.ndarray:
+    """Integer counts summing to n, proportional to p (largest-remainder rounding)."""
+    raw = p / p.sum() * n
+    counts = np.floor(raw).astype(int)
+    short = n - counts.sum()
+    if short > 0:
+        counts[np.argsort(-(raw - counts))[:short]] += 1
+    return counts
+
+
+def optimizer_slice(df: pd.DataFrame, fmt: str, n_solves: int, noise: float,
+                    rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Distinct lineups that are optimal for projections x lognormal(0, noise),
+    with the share of `n_solves` solves each won: (weights (M, P), probs (M)).
+    """
+    proj = df["proj"].to_numpy(dtype=float)
+    counts: Counter = Counter()
+    lineups: dict = {}
+    for _ in range(n_solves):
+        pts = proj * rng.lognormal(0.0, noise, len(proj))
+        lu = solve_classic(df, pts) if fmt == "classic" else solve_showdown(df, pts)
+        if lu is None:
+            continue
+        key = lineup_key(lu.player_ids, lu.captain_id)
+        counts[key] += 1
+        lineups.setdefault(key, lu)
+    if not counts:
+        raise RuntimeError("Optimizer slice found no feasible lineups")
+    keys = list(counts)
+    w = lineups_to_weights([lineups[k] for k in keys], len(df))
+    p = np.array([counts[k] for k in keys], dtype=float)
+    return w, p / p.sum()
 
 
 def field_score_ratios(field_w: np.ndarray, scores: np.ndarray) -> np.ndarray:

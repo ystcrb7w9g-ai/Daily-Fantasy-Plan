@@ -150,8 +150,14 @@ What it does:
    MILP-optimal for a blend of the median projection and one simulated
    outcome, with a random blend weight, so the pool runs from safe builds to
    boom-or-bust ones. Stacking rules apply.
-2. **Field.** Samples `--field-size` opponent lineups from projected
-   ownership. All are salary-legal and at least `--field-min-salary`
+2. **Field.** Samples `--field-size` opponent lineups. 6% of them
+   (`--field-optimizer-share`) are an **optimizer slice**: lineups that
+   are optimal for your projections plus per-user noise, repeated in
+   proportion to how often each comes out optimal. Popular builds
+   therefore duplicate the way real fields do. With this slice, a
+   simulated 165k-entry Milly has 6.7% of entries in duplicated lineups
+   and a top lineup at ~60–140 copies, versus 5.7–10.2% and 69–346 in real
+   2026 Millys. The rest are sampled from projected ownership. All are salary-legal and at least `--field-min-salary`
    (default $49k Classic, $47k Showdown). They're resampled so that 25% /
    40% / 35% pair the QB with 0 / 1 / 2+ of his own pass catchers
    (`--field-stack-mix`). The sampling weights are then calibrated so the
@@ -274,7 +280,7 @@ entries or usernames). From three 2026 Millionaire Makers (Weeks 1–3,
 | QB with 0 / 1 / 2+ of his own WR/TE | 19% / 53% / 28% | the field sampler's stack mix |
 | FLEX filled by RB / WR / TE | 42% / 33% / 25% | ownership position totals |
 | Most-owned RB / WR / TE / QB / DST | ~45% / 26% / 26% / 12% / 19% | ownership checks + estimator |
-| Entries in a duplicated lineup | 6–10% | known gap (see limitations) |
+| Entries in a duplicated lineup | 6–10% (top lineup 69–346 copies) | the field's optimizer slice |
 
 **Ownership checks and fallback.** `dk-pool` and `dk-run` compare your
 ownership column to these real fields, rescaled to the slate's size. They
@@ -453,10 +459,6 @@ python3 tests/run_tests.py
   projections come only from the SportsGameOdds prop baseline above. For
   best results supply your own `proj` (from a paid provider or your
   model) and use SGO as the market baseline to blend against.
-- **The simulated field duplicates too little.** Only ~1% of its entries
-  share a lineup, versus 6–10% in real Millys, where chalk and
-  optimizer-built lineups cluster. Prize splitting for chalky lineups is
-  therefore underestimated, which slightly favors chalk.
 - **Contest-sim ROI is optimistic in absolute terms.** The `contest`
   field is sampled from ownership with a stacking mix; it doesn't model
   the real field's skill or strategy distribution. Use simulated ROI /

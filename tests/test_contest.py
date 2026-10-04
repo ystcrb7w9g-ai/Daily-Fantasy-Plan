@@ -172,3 +172,32 @@ def test_select_portfolio_roi_picks_best_first_and_top1_covers_more():
     s_roi = cs.portfolio_summary(res, roi_pick, 10.0)
     s_top = cs.portfolio_summary(res, top_pick, 10.0)
     assert s_top["p_any_top1"] >= s_roi["p_any_top1"] - 1e-9
+
+
+def test_optimizer_slice_adds_realistic_duplication_and_keeps_ownership():
+    from collections import Counter
+    df = _value_owned_pool()
+    plain = cs.generate_field(df, 3000, seed=21)
+    sliced = cs.generate_field(df, 3000, seed=21, optimizer_share=0.1, optimizer_solves=60,
+                               optimizer_noise=0.15)
+    def in_dupes(f):
+        c = np.array(list(Counter(map(bytes, (f * 2).astype(np.uint8))).values()))
+        return c[c >= 2].sum() / len(f)
+    assert len(sliced) == 3000
+    assert in_dupes(sliced) >= in_dupes(plain) + 0.08
+    own = df["own"].to_numpy()
+    assert np.abs((sliced > 0).mean(axis=0) - own).mean() < 0.02
+    sal = sliced @ df["salary"].to_numpy()
+    assert (sal <= 50_000).all() and (sliced.sum(axis=1) == 9).all()
+
+
+def test_duplicated_field_lineups_raise_candidate_dupes():
+    df = _value_owned_pool()
+    field = cs.generate_field(df, 3000, seed=22, optimizer_share=0.1, optimizer_solves=40,
+                              optimizer_noise=0.1)
+    from collections import Counter
+    top = max(Counter(map(bytes, (field * 2).astype(np.uint8))).items(), key=lambda kv: kv[1])
+    chalk = np.frombuffer(top[0], dtype=np.uint8).astype(np.float32)[None, :] / 2
+    scores = simulate_player_scores(df, n_trials=200, seed=23)
+    res = cs.simulate_contest(chalk, field, scores, cs.gpp_payout_curve(30_000, 10.0))
+    assert res.metrics["exp_dupes"].iloc[0] >= top[1] * (30_000 - 1) / 3000 - 1e-6
