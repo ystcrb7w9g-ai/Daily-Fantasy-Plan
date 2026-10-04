@@ -93,6 +93,7 @@ def _stack_rules(args: argparse.Namespace) -> StackRules | None:
         bring_back=args.bring_back,
         max_vs_dst=args.max_vs_dst,
         max_per_team=args.max_per_team,
+        max_per_game=args.max_per_game,
     )
     if not rules.is_active():
         return None
@@ -144,6 +145,8 @@ def _add_stack_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--max-vs-dst", type=int, default=None,
                    help="max offensive players facing your DST (0 = never)")
     p.add_argument("--max-per-team", type=int, default=None, help="max players from one team")
+    p.add_argument("--max-per-game", type=int, default=None,
+                   help="max players from one game (e.g. 5 stops whole-game stacks)")
 
 
 def cmd_build(args: argparse.Namespace) -> None:

@@ -42,16 +42,18 @@ class StackRules:
     bring_back      : min players (non-DST) from the QB's opponent.
     max_vs_dst      : max offensive players facing your own DST (0 = none).
     max_per_team    : max players from any single team (DST included).
+    max_per_game    : max players from any single game (DST included).
     """
     qb_stack: int = 0
     stack_positions: tuple[str, ...] = ("WR", "TE")
     bring_back: int = 0
     max_vs_dst: int | None = None
     max_per_team: int | None = None
+    max_per_game: int | None = None
 
     def is_active(self) -> bool:
-        return bool(self.qb_stack or self.bring_back
-                    or self.max_vs_dst is not None or self.max_per_team is not None)
+        return bool(self.qb_stack or self.bring_back or self.max_vs_dst is not None
+                    or self.max_per_team is not None or self.max_per_game is not None)
 
 
 def stack_constraint_rows(df: pd.DataFrame, rules: StackRules) -> tuple[list, list, list]:
@@ -86,6 +88,11 @@ def stack_constraint_rows(df: pd.DataFrame, rules: StackRules) -> tuple[list, li
     if rules.max_per_team is not None:
         for t in np.unique(team):
             A_rows.append((team == t).astype(float)); lb.append(0); ub.append(rules.max_per_team)
+
+    if rules.max_per_game is not None:
+        game = _game_keys(df)
+        for g in np.unique(game):
+            A_rows.append((game == g).astype(float)); lb.append(0); ub.append(rules.max_per_game)
 
     return A_rows, lb, ub
 

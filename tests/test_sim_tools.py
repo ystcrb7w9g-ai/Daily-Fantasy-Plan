@@ -143,3 +143,14 @@ def test_stack_rules_flow_through_portfolio_builder():
     assert len(lineups) == 5
     for lu in lineups:
         _check_rules(df, lu.player_ids, rules)
+
+
+def test_max_per_game_caps_single_game_stacks():
+    from dfs_engine.optimize import _game_keys
+    df = _multi_game_pool()
+    df["salary"] = 3000
+    pts = np.where(df["team"].isin(["AAA", "BBB"]), 30.0, 1.0)
+    free = solve_classic(df, pts)
+    capped = solve_classic(df, pts, stack_rules=StackRules(max_per_game=5))
+    count = lambda lu: np.unique(_game_keys(df)[lu.player_ids], return_counts=True)[1].max()  # noqa: E731
+    assert count(free) == 8 and count(capped) == 5

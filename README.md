@@ -117,6 +117,7 @@ applied to every MILP solve:
 | `--bring-back N` | at least N players from your QB's opponent |
 | `--max-vs-dst N` | at most N offensive players facing your DST (`0` = never) |
 | `--max-per-team N` | at most N players from any one team |
+| `--max-per-game N` | at most N players from any one game (5 stops whole-game stacks) |
 
 ```bash
 python -m dfs_engine.cli build --pool data/week5_players.csv \
