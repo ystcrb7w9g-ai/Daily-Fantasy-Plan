@@ -9,6 +9,7 @@ Modules:
     data        -- load/validate player pool CSVs
     simulate    -- correlated game-script Monte Carlo simulation
     optimize    -- MILP lineup solver (Classic + Showdown)
+    outcomes    -- per-player median/ceiling/boom/bust/Optimal% report
     portfolio   -- build N lineups with exposure caps + uniqueness
     diagnostics -- Optimal% leverage diagnostic (SaberSim-style)
     sportsgameodds -- SportsGameOdds lines + prop-implied baseline projections

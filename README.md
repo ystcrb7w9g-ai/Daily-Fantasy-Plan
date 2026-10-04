@@ -33,6 +33,13 @@ shared, correlated factors — the same basic approach real sim-based tools
    symmetric normal distribution.
 6. **QB-tier variance scaling**: cheaper/less-proven QBs get higher
    variance as a proxy for backup/game-manager bust risk.
+7. **Ceiling calibration**: each player's distribution is then rescaled
+   so his simulated 85th percentile lands on the `ceiling` column while
+   his mean stays on `proj` (Stokastic/SaberSim-style median + ceiling
+   fitting). It's a per-player affine rescale, so the correlations from
+   steps 1–5 are preserved. Players without a usable ceiling keep the
+   default spread. Change the percentile with `--ceiling-pct`, or turn
+   it off with `--no-ceiling-calibration`.
 
 ## Install
 
@@ -78,6 +85,43 @@ time out — rerun with a higher `--trials` value and the same `--seed`
 offset pattern to extend a prior run (see `dfs_engine/diagnostics.py`
 for the lower-level `save_checkpoint` / `load_checkpoint` helpers if you
 want to checkpoint across process restarts).
+
+### Player outcome table (median / ceiling / boom / bust / Optimal%)
+
+```bash
+python -m dfs_engine.cli outcomes \
+    --pool data/sample_classic_pool.csv \
+    --trials 20000 --optimal-trials 2000 \
+    --out outcomes.csv
+```
+
+One row per player with `sim_mean`, `sim_median`, `sim_p85`, `sim_p99`,
+`sim_std`, `boom_pct` (score ≥ 4× salary/1000), `bust_pct`
+(< 2× salary/1000), and `pts_per_k`. With `--optimal-trials N` it also
+solves N trials for `optimal_pct` and `leverage` (Optimal% − Own%).
+Thresholds: `--boom-mult` / `--bust-mult`.
+
+### Stacking rules (Classic)
+
+`build`, `diagnose` and `outcomes` accept hard correlation constraints,
+applied to every MILP solve:
+
+| Flag | Meaning |
+|---|---|
+| `--qb-stack N` | at least N same-team players from `--stack-positions` (default `WR,TE`) with your QB |
+| `--bring-back N` | at least N players from your QB's opponent |
+| `--max-vs-dst N` | at most N offensive players facing your DST (`0` = never) |
+| `--max-per-team N` | at most N players from any one team |
+
+```bash
+python -m dfs_engine.cli build --pool data/week5_players.csv \
+    --n-lineups 150 --qb-stack 2 --bring-back 1 --max-vs-dst 0 --out lineups.csv
+```
+
+Rules are ignored (with a note) for Showdown. On a very small pool they
+can make every lineup infeasible. The bundled one-game sample, for
+example, can't satisfy `--max-vs-dst` at all, and the builder then
+reports 0 lineups.
 
 ### Pull in SportsGameOdds lines + prop-based baseline projections
 
@@ -160,8 +204,9 @@ See `data/sample_classic_pool.csv` for a worked example (one game,
 ```
 dfs_engine/
   data.py         # CSV loading + validation
-  simulate.py     # correlated Monte Carlo player-score simulation
-  optimize.py     # MILP solver (Classic + Showdown)
+  simulate.py     # correlated Monte Carlo player-score simulation (+ ceiling calibration)
+  optimize.py     # MILP solver (Classic + Showdown) + stacking rules
+  outcomes.py     # per-player median/p85/p99/boom/bust/Optimal% report
   portfolio.py    # N-lineup portfolio builder (exposure caps, uniqueness)
   diagnostics.py  # Optimal% leverage diagnostic
   sportsgameodds.py # SportsGameOdds fetch, game lines, prop -> DK baseline
@@ -169,6 +214,7 @@ dfs_engine/
 tests/
   test_engine.py  # pytest-style tests
   test_sportsgameodds.py
+  test_sim_tools.py  # ceiling calibration, outcomes report, stacking rules
   run_tests.py    # standalone runner (no pytest dependency)
 data/
   sample_classic_pool.csv

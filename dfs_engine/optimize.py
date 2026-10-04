@@ -5,6 +5,10 @@ Supports:
     - Classic: QB(1) RB(2-3) WR(3-4) TE(1-2) FLEX(RB/WR/TE) DST(1), 9 total, $50,000 cap
     - Showdown: 1 Captain (1.5x salary + 1.5x points) + 5 FLEX, $50,000 cap,
       single combined pool across both teams.
+
+Classic lineups can additionally enforce SaberSim/Stokastic-style
+stacking rules via `StackRules` (QB stack, bring-back, no offense vs your
+DST, max players per team).
 """
 from __future__ import annotations
 
@@ -16,6 +20,65 @@ from scipy.optimize import LinearConstraint, Bounds, milp
 
 SALARY_CAP = 50_000
 CLASSIC_ROSTER_SIZE = 9
+
+
+@dataclass
+class StackRules:
+    """
+    Classic-only correlation/stacking constraints. Every rule is optional.
+
+    qb_stack        : min same-team players from `stack_positions` paired
+                      with the chosen QB (e.g. 2 -> "QB + 2").
+    stack_positions : positions that count toward the QB stack.
+    bring_back      : min players (non-DST) from the QB's opponent.
+    max_vs_dst      : max offensive players facing your own DST (0 = none).
+    max_per_team    : max players from any single team (DST included).
+    """
+    qb_stack: int = 0
+    stack_positions: tuple[str, ...] = ("WR", "TE")
+    bring_back: int = 0
+    max_vs_dst: int | None = None
+    max_per_team: int | None = None
+
+    def is_active(self) -> bool:
+        return bool(self.qb_stack or self.bring_back
+                    or self.max_vs_dst is not None or self.max_per_team is not None)
+
+
+def stack_constraint_rows(df: pd.DataFrame, rules: StackRules) -> tuple[list, list, list]:
+    """Linear rows (A, lb, ub) over the per-player binary vector implementing `rules`."""
+    n = len(df)
+    pos = df["position"].to_numpy()
+    team = df["team"].to_numpy()
+    opp = df["opp"].to_numpy()
+    offense = pos != "DST"
+    big = float(CLASSIC_ROSTER_SIZE)
+    A_rows, lb, ub = [], [], []
+
+    for q in np.where(pos == "QB")[0]:
+        # sum(stackers on QB's team) - k * x_qb >= 0
+        if rules.qb_stack:
+            row = ((team == team[q]) & np.isin(pos, rules.stack_positions)).astype(float)
+            row[q] = -rules.qb_stack
+            A_rows.append(row); lb.append(0); ub.append(np.inf)
+        # sum(opponent offense) - k * x_qb >= 0
+        if rules.bring_back:
+            row = ((team == opp[q]) & offense).astype(float)
+            row[q] = -rules.bring_back
+            A_rows.append(row); lb.append(0); ub.append(np.inf)
+
+    if rules.max_vs_dst is not None:
+        # sum(offense facing DST d) + (big - k) * x_d <= big
+        for d in np.where(pos == "DST")[0]:
+            row = ((team == opp[d]) & offense).astype(float)
+            row[d] = big - rules.max_vs_dst
+            A_rows.append(row); lb.append(-np.inf); ub.append(big)
+
+    if rules.max_per_team is not None:
+        for t in np.unique(team):
+            A_rows.append((team == t).astype(float)); lb.append(0); ub.append(rules.max_per_team)
+
+    return A_rows, lb, ub
 
 
 @dataclass
@@ -32,6 +95,7 @@ def solve_classic(
     locked_ids: set[int] | None = None,
     excluded_ids: set[int] | None = None,
     max_exposure_mask: np.ndarray | None = None,
+    stack_rules: StackRules | None = None,
 ) -> LineupResult | None:
     """
     Solve one optimal Classic DK lineup given a points vector (one
@@ -73,6 +137,10 @@ def solve_classic(
     for pid in excluded_ids:
         row = np.zeros(n); row[pid] = 1
         A_rows.append(row); lb.append(0); ub.append(0)
+
+    if stack_rules is not None and stack_rules.is_active():
+        s_rows, s_lb, s_ub = stack_constraint_rows(df, stack_rules)
+        A_rows += s_rows; lb += s_lb; ub += s_ub
 
     A = np.vstack(A_rows)
     constraints = LinearConstraint(A, lb, ub)

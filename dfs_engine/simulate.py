@@ -24,6 +24,13 @@ noise:
    (long TDs, garbage-time scores) better than a pure Gaussian.
 6. QB variance is scaled up for lower-salary (backup/game-manager-risk)
    quarterbacks relative to top-salary-tier starters.
+7. Ceiling calibration: each player's simulated deviation from his
+   projection is then stretched/shrunk (and re-centered) so his
+   `ceiling_pct` percentile (default 85th) lands on the `ceiling` column
+   while his mean stays on `proj` -- the way Stokastic/SaberSim fit each
+   distribution to a median + ceiling. A per-player affine rescale leaves
+   pairwise correlations unchanged, so the game/team structure is kept.
+   Players with no usable ceiling keep the default spread from steps 5-6.
 
 The output is a (n_trials, n_players) array of simulated fantasy points.
 """
@@ -65,6 +72,8 @@ def simulate_player_scores(
     target_competition_weight: float = 0.45,
     game_script_weight: float = 0.18,
     residual_sd_frac: float = 0.32,
+    calibrate_ceiling: bool = True,
+    ceiling_pct: float = 0.85,
 ) -> np.ndarray:
     """
     Simulate fantasy points for every player in `df` across `n_trials`
@@ -170,5 +179,56 @@ def simulate_player_scores(
     ) * noise_sd
 
     scores = mean_component + noise_component
+    if calibrate_ceiling and "ceiling" in df.columns:
+        scale, shift = ceiling_calibration(
+            scores, df["ceiling"].to_numpy(dtype=float), proj, ceiling_pct,
+        )
+        scores = proj[None, :] + shift[None, :] + scale[None, :] * (scores - proj[None, :])
+
     scores = np.clip(scores, 0.0, None)
     return scores
+
+
+def ceiling_calibration(
+    raw_scores: np.ndarray,
+    ceiling: np.ndarray,
+    proj: np.ndarray,
+    ceiling_pct: float = 0.85,
+    calib_trials: int = 4000,
+    scale_bounds: tuple[float, float] = (0.2, 6.0),
+    n_outer: int = 6,
+    n_iter: int = 25,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Per-player (scale, shift) such that
+        x = max(proj + shift + scale * (raw - proj), 0)
+    has its `ceiling_pct` percentile at `ceiling` and its mean at `proj`.
+
+    Alternates a vectorized bisection on `scale` (the percentile is
+    monotone in it) with a mean-correcting update of `shift` (needed
+    because clipping at 0 lifts the mean of wide distributions). Fit on a
+    subsample of trials. Players whose ceiling is missing or not above
+    their projection get (1, 0), i.e. the uncalibrated spread.
+    """
+    dev = raw_scores[:calib_trials] - proj[None, :]
+    n_players = dev.shape[1]
+    q = ceiling_pct * 100.0
+    valid = np.isfinite(ceiling) & (ceiling > proj) & (proj > 0)
+
+    def draw(scale, shift):
+        return np.clip(proj[None, :] + shift[None, :] + scale[None, :] * dev, 0.0, None)
+
+    shift = np.zeros(n_players)
+    scale = np.ones(n_players)
+    for _ in range(n_outer):
+        lo = np.full(n_players, scale_bounds[0])
+        hi = np.full(n_players, scale_bounds[1])
+        for _ in range(n_iter):
+            mid = 0.5 * (lo + hi)
+            too_high = np.percentile(draw(mid, shift), q, axis=0) > ceiling
+            hi = np.where(too_high, mid, hi)
+            lo = np.where(too_high, lo, mid)
+        scale = 0.5 * (lo + hi)
+        shift = shift + (proj - draw(scale, shift).mean(axis=0))
+
+    return np.where(valid, scale, 1.0), np.where(valid, shift, 0.0)

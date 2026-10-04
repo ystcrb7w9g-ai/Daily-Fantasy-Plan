@@ -17,7 +17,7 @@ from collections import Counter
 import numpy as np
 import pandas as pd
 
-from .optimize import solve_classic, solve_showdown, LineupResult
+from .optimize import solve_classic, solve_showdown, LineupResult, StackRules
 
 
 def default_exposure_cap(own: float) -> float:
@@ -40,6 +40,7 @@ def build_portfolio(
     dst_cap: float = 0.22,
     max_attempts_per_slot: int = 40,
     seed: int | None = None,
+    stack_rules: StackRules | None = None,
 ) -> list[LineupResult]:
     """
     Parameters
@@ -51,10 +52,14 @@ def build_portfolio(
     min_unique : minimum number of differing players required vs. every
                  already-accepted lineup
     dst_cap : max exposure specifically for DST (classic only)
+    stack_rules : optional stacking constraints applied to every solve (classic only)
     """
     rng = np.random.default_rng(seed)
     n_trials, n_players = scores.shape
-    solver = solve_classic if fmt == "classic" else solve_showdown
+    if fmt == "classic":
+        solver = lambda d, p, **kw: solve_classic(d, p, stack_rules=stack_rules, **kw)  # noqa: E731
+    else:
+        solver = solve_showdown
     roster_size = 9 if fmt == "classic" else 6
 
     exposure_count = Counter()

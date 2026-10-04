@@ -17,13 +17,14 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .optimize import solve_classic, solve_showdown
+from .optimize import solve_classic, solve_showdown, StackRules
 
 
 def run_optimal_pct_chunk(
     df: pd.DataFrame,
     scores_chunk: np.ndarray,
     fmt: str = "classic",
+    stack_rules: StackRules | None = None,
 ) -> np.ndarray:
     """
     Run the Optimal% diagnostic over one chunk of trials.
@@ -32,10 +33,11 @@ def run_optimal_pct_chunk(
     """
     n_players = scores_chunk.shape[1]
     counts = np.zeros(n_players, dtype=int)
-    solver = solve_classic if fmt == "classic" else solve_showdown
-
     for trial_points in scores_chunk:
-        result = solver(df, trial_points)
+        if fmt == "classic":
+            result = solve_classic(df, trial_points, stack_rules=stack_rules)
+        else:
+            result = solve_showdown(df, trial_points)
         if result is not None:
             counts[result.player_ids] += 1
 

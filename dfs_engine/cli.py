@@ -14,6 +14,15 @@ Run the Optimal% leverage diagnostic only:
     python -m dfs_engine.cli diagnose --pool data/week4_players.csv \\
         --trials 50000 --fmt classic --out leverage.csv
 
+Player outcome table (median / p85 / p99 / boom% / bust% / Optimal%):
+
+    python -m dfs_engine.cli outcomes --pool data/week4_players.csv \\
+        --trials 20000 --optimal-trials 2000 --out outcomes.csv
+
+Stacking rules (Classic) work on build / diagnose / outcomes:
+
+    --qb-stack 2 --bring-back 1 --max-vs-dst 0 --max-per-team 4
+
 Pull SportsGameOdds lines/props and blend them into a pool:
 
     export SPORTSGAMEODDS_API_KEY=...
@@ -31,6 +40,8 @@ import pandas as pd
 
 from .data import load_player_pool, validate_showdown_pool
 from .simulate import simulate_player_scores
+from .optimize import StackRules
+from .outcomes import player_outcomes
 from .portfolio import build_portfolio, exposure_report
 from .diagnostics import run_optimal_pct_chunk, leverage_report
 from . import sportsgameodds as sgo
@@ -54,18 +65,59 @@ def _lineups_to_dataframe(df: pd.DataFrame, lineups, fmt: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _stack_rules(args: argparse.Namespace) -> StackRules | None:
+    rules = StackRules(
+        qb_stack=args.qb_stack,
+        stack_positions=tuple(p.strip().upper() for p in args.stack_positions.split(",")),
+        bring_back=args.bring_back,
+        max_vs_dst=args.max_vs_dst,
+        max_per_team=args.max_per_team,
+    )
+    if not rules.is_active():
+        return None
+    if args.fmt != "classic":
+        print("Note: stacking rules apply to Classic only; ignoring for Showdown.")
+        return None
+    return rules
+
+
+def _simulate(df: pd.DataFrame, args: argparse.Namespace, n_trials: int, seed) -> np.ndarray:
+    return simulate_player_scores(
+        df, n_trials=n_trials, seed=seed,
+        calibrate_ceiling=not args.no_ceiling_calibration, ceiling_pct=args.ceiling_pct,
+    )
+
+
+def _add_sim_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--ceiling-pct", type=float, default=0.85,
+                   help="percentile the `ceiling` column represents (calibrates each player's spread)")
+    p.add_argument("--no-ceiling-calibration", action="store_true",
+                   help="ignore `ceiling` and use the default fixed-fraction spread")
+
+
+def _add_stack_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--qb-stack", type=int, default=0, help="min same-team pass catchers with the QB")
+    p.add_argument("--stack-positions", default="WR,TE", help="positions counting toward --qb-stack")
+    p.add_argument("--bring-back", type=int, default=0, help="min players from the QB's opponent")
+    p.add_argument("--max-vs-dst", type=int, default=None,
+                   help="max offensive players facing your DST (0 = never)")
+    p.add_argument("--max-per-team", type=int, default=None, help="max players from one team")
+
+
 def cmd_build(args: argparse.Namespace) -> None:
     df = load_player_pool(args.pool)
     if args.fmt == "showdown":
         validate_showdown_pool(df)
 
+    rules = _stack_rules(args)
     print(f"Loaded {len(df)} players. Simulating {args.trials} correlated trials...")
-    scores = simulate_player_scores(df, n_trials=args.trials, seed=args.seed)
+    scores = _simulate(df, args, args.trials, args.seed)
 
     print(f"Building {args.n_lineups} lineups ({args.fmt})...")
     lineups = build_portfolio(
         df, scores, n_lineups=args.n_lineups, fmt=args.fmt,
         min_unique=args.min_unique, dst_cap=args.dst_cap, seed=args.seed,
+        stack_rules=rules,
     )
     print(f"Built {len(lineups)}/{args.n_lineups} lineups "
           f"({'hit combinatorial ceiling' if len(lineups) < args.n_lineups else 'full portfolio'}).")
@@ -85,6 +137,7 @@ def cmd_diagnose(args: argparse.Namespace) -> None:
     if args.fmt == "showdown":
         validate_showdown_pool(df)
 
+    rules = _stack_rules(args)
     n_players = len(df)
     counts = np.zeros(n_players, dtype=int)
     done = 0
@@ -93,14 +146,37 @@ def cmd_diagnose(args: argparse.Namespace) -> None:
     print(f"Running Optimal% diagnostic: {args.trials} trials in chunks of {chunk_size}...")
     while done < args.trials:
         this_chunk = min(chunk_size, args.trials - done)
-        scores = simulate_player_scores(df, n_trials=this_chunk, seed=(args.seed or 0) + done)
-        counts += run_optimal_pct_chunk(df, scores, fmt=args.fmt)
+        scores = _simulate(df, args, this_chunk, (args.seed or 0) + done)
+        counts += run_optimal_pct_chunk(df, scores, fmt=args.fmt, stack_rules=rules)
         done += this_chunk
         print(f"  {done}/{args.trials} trials complete")
 
     report = leverage_report(df, counts, done)
     report.to_csv(args.out, index=False)
     print(f"Wrote leverage report to {args.out}")
+
+
+def cmd_outcomes(args: argparse.Namespace) -> None:
+    df = load_player_pool(args.pool)
+    if args.fmt == "showdown":
+        validate_showdown_pool(df)
+    rules = _stack_rules(args)
+
+    print(f"Simulating {args.trials} correlated trials for {len(df)} players...")
+    scores = _simulate(df, args, args.trials, args.seed)
+
+    counts, n_opt = None, 0
+    if args.optimal_trials:
+        n_opt = min(args.optimal_trials, args.trials)
+        print(f"Solving optimal lineups on {n_opt} trials for Optimal%...")
+        counts = run_optimal_pct_chunk(df, scores[:n_opt], fmt=args.fmt, stack_rules=rules)
+
+    report = player_outcomes(
+        df, scores, boom_mult=args.boom_mult, bust_mult=args.bust_mult,
+        optimal_counts=counts, optimal_trials=n_opt,
+    )
+    report.to_csv(args.out, index=False)
+    print(f"Wrote player outcome report to {args.out}")
 
 
 def _fetch_sgo(args: argparse.Namespace) -> list[dict]:
@@ -175,6 +251,8 @@ def main() -> None:
     p_build.add_argument("--seed", type=int, default=None)
     p_build.add_argument("--out", required=True)
     p_build.add_argument("--exposure-out", default=None)
+    _add_sim_args(p_build)
+    _add_stack_args(p_build)
     p_build.set_defaults(func=cmd_build)
 
     p_diag = sub.add_parser("diagnose", help="Run the Optimal%% leverage diagnostic")
@@ -184,7 +262,23 @@ def main() -> None:
     p_diag.add_argument("--fmt", choices=["classic", "showdown"], default="classic")
     p_diag.add_argument("--seed", type=int, default=None)
     p_diag.add_argument("--out", required=True)
+    _add_sim_args(p_diag)
+    _add_stack_args(p_diag)
     p_diag.set_defaults(func=cmd_diagnose)
+
+    p_out = sub.add_parser("outcomes", help="Per-player median/ceiling/boom/bust (+ Optimal%%) report")
+    p_out.add_argument("--pool", required=True)
+    p_out.add_argument("--trials", type=int, default=20_000)
+    p_out.add_argument("--optimal-trials", type=int, default=0,
+                       help="also solve this many trials for Optimal%%/leverage (0 = skip)")
+    p_out.add_argument("--fmt", choices=["classic", "showdown"], default="classic")
+    p_out.add_argument("--boom-mult", type=float, default=4.0, help="boom = score >= mult x salary/1000")
+    p_out.add_argument("--bust-mult", type=float, default=2.0, help="bust = score < mult x salary/1000")
+    p_out.add_argument("--seed", type=int, default=None)
+    p_out.add_argument("--out", required=True)
+    _add_sim_args(p_out)
+    _add_stack_args(p_out)
+    p_out.set_defaults(func=cmd_outcomes)
 
     p_fetch = sub.add_parser("sgo-fetch", help="Download SportsGameOdds events (lines + props) to JSON")
     _add_sgo_fetch_args(p_fetch)
