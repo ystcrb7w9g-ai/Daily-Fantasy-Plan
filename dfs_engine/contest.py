@@ -292,13 +292,31 @@ def _qb_stack_counts(ids: np.ndarray, df: pd.DataFrame) -> np.ndarray:
     return (same & catcher[ids[:, 1:]]).sum(axis=1)
 
 
+def _auto_stack_boost(df, own, mix, rng, probe=2048,
+                      options=(1.0, 1.5, 2.5, 4.0, 6.0, 10.0, 15.0)) -> float:
+    """
+    Boost whose raw draws best cover the target stack mix, i.e. maximize
+    min_k(raw_share_k / target_k): the scarcest bucket sets how much
+    oversampling the resampler needs.
+    """
+    best, best_cov = options[0], -1.0
+    for b in options:
+        ids, _, ok = _sample_classic(df, np.log(own), probe, rng, b, 0)
+        counts = np.minimum(_qb_stack_counts(ids[ok], df), 2)
+        share = np.bincount(counts, minlength=3) / max(len(counts), 1)
+        cov = float(np.min(share / np.maximum(mix, 1e-9)))
+        if cov > best_cov:
+            best, best_cov = b, cov
+    return best
+
+
 def generate_field(
     df: pd.DataFrame,
     n_field: int,
     fmt: str = "classic",
     min_salary: int | None = None,
     stack_mix: tuple[float, float, float] | None = DEFAULT_STACK_MIX,
-    stack_boost: float = 10.0,
+    stack_boost: float | None = None,
     calibration_rounds: int = 5,
     seed: int | None = None,
     batch: int = 8192,
@@ -313,9 +331,11 @@ def generate_field(
       (Classic) / $47,000 (Showdown); if almost no sampled lineup can reach
       it (tiny pools) it is lowered, with a warning.
     - Classic stacking: QB teammates' WR/TE get a `stack_boost` sampling
-      weight (sized so the raw draw is already near `stack_mix`, which keeps
-      oversampling cheap), then lineups are resampled so the shares with 0 / 1 / 2+
+      weight, then lineups are resampled so the shares with 0 / 1 / 2+
       QB-stacked pass catchers match `stack_mix` (None = no resampling).
+      `stack_boost=None` auto-picks the boost whose raw draws come closest
+      to `stack_mix` on this slate, which keeps the resampling cheap on
+      both short and full slates.
     - Finally the weights are rescaled over a few rounds so the field's
       realized ownership matches the `own` column (rescaled to sum to the
       roster size if it doesn't). Field strength therefore
@@ -344,6 +364,9 @@ def generate_field(
         if fmt == "classic":
             return _sample_classic(df, logw, batch, rng, stack_boost, floor)
         return _sample_showdown(df, logw, batch, rng, floor)
+
+    if stack_boost is None:
+        stack_boost = _auto_stack_boost(df, own, mix, rng) if use_mix else 2.5
 
     if min_salary is None:
         min_salary = 49_000 if fmt == "classic" else 47_000
