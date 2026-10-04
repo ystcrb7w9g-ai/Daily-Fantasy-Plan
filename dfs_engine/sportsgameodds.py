@@ -268,6 +268,19 @@ def _over_prob(over: dict | None, under: dict | None) -> float | None:
 # Game lines
 # ---------------------------------------------------------------------------
 
+def _is_pregame(ev: dict) -> bool:
+    """Only events that haven't started: odds on started/finished games are live or stale lines."""
+    st = ev.get("status") or {}
+    return not (st.get("started") or st.get("ended") or st.get("finalized") or st.get("cancelled"))
+
+
+def _open(odd: dict | None) -> dict:
+    """The odd if its market is still open (not ended/cancelled), else {}."""
+    if not odd or odd.get("ended") or odd.get("cancelled"):
+        return {}
+    return odd
+
+
 def extract_game_lines(events: Iterable[dict]) -> pd.DataFrame:
     """
     One row per team per game: team, opp, game_total, spread (that team's,
@@ -275,6 +288,8 @@ def extract_game_lines(events: Iterable[dict]) -> pd.DataFrame:
     """
     rows = []
     for ev in events:
+        if not _is_pregame(ev):
+            continue
         teams = ev.get("teams") or {}
         home, away = teams.get("home") or {}, teams.get("away") or {}
         h = team_abbr(home.get("teamID"), home.get("names"))
@@ -283,16 +298,16 @@ def extract_game_lines(events: Iterable[dict]) -> pd.DataFrame:
             continue
         odds = ev.get("odds") or {}
 
-        total = _line(odds.get("points-all-game-ou-over", {}), "OverUnder")
-        home_spread = _line(odds.get("points-home-game-sp-home", {}), "Spread")
+        total = _line(_open(odds.get("points-all-game-ou-over")), "OverUnder")
+        home_spread = _line(_open(odds.get("points-home-game-sp-home")), "Spread")
         if home_spread is None:
-            away_spread = _line(odds.get("points-away-game-sp-away", {}), "Spread")
+            away_spread = _line(_open(odds.get("points-away-game-sp-away")), "Spread")
             home_spread = -away_spread if away_spread is not None else None
         if total is None or home_spread is None:
             continue
 
-        home_tt = _line(odds.get("points-home-game-ou-over", {}), "OverUnder")
-        away_tt = _line(odds.get("points-away-game-ou-over", {}), "OverUnder")
+        home_tt = _line(_open(odds.get("points-home-game-ou-over")), "OverUnder")
+        away_tt = _line(_open(odds.get("points-away-game-ou-over")), "OverUnder")
         # Implied team totals from total/spread when team-total markets are absent.
         if home_tt is None:
             home_tt = total / 2.0 - home_spread / 2.0
@@ -323,6 +338,8 @@ def extract_player_props(events: Iterable[dict]) -> pd.DataFrame:
     """
     rows = []
     for ev in events:
+        if not _is_pregame(ev):
+            continue
         odds = ev.get("odds") or {}
         players = ev.get("players") or {}
         seen: set[tuple[str, str]] = set()
@@ -335,7 +352,7 @@ def extract_player_props(events: Iterable[dict]) -> pd.DataFrame:
                 continue
             if (bet_type, side) not in (("ou", "over"), ("yn", "yes")):
                 continue
-            if (entity, stat_id) in seen:
+            if (entity, stat_id) in seen or not _open(odd):
                 continue
             seen.add((entity, stat_id))
 

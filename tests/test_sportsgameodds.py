@@ -138,3 +138,18 @@ def test_sgo_fetch_follows_cursor_pagination():
     assert [e["eventID"] for e in events] == ["A", "B"]
     assert "leagueID=NFL" in seen_urls[0] and "cursor=c1" in seen_urls[1]
     assert seen_headers[0].get("X-api-key") == "KEY"
+
+
+def test_sgo_skips_started_games_and_closed_markets():
+    import copy
+    ev = copy.deepcopy(_events()[0])
+    finished = copy.deepcopy(ev)
+    finished["status"].update({"started": True, "ended": True})
+    assert sgo.extract_game_lines([finished]).empty
+    assert sgo.extract_player_props([finished]).empty
+    closed = copy.deepcopy(ev)
+    closed["odds"]["points-all-game-ou-over"]["ended"] = True
+    assert sgo.extract_game_lines([closed]).empty  # no open total -> no line
+    props = sgo.extract_player_props([ev])
+    closed["odds"]["passing_yards-JOSH_ALLEN_1_NFL-game-ou-over"]["ended"] = True
+    assert len(sgo.extract_player_props([closed])) == len(props) - 1
