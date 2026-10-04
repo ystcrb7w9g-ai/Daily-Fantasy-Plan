@@ -701,8 +701,9 @@ def main() -> None:
                        help="sampled field lineups standing in for the contest")
     p_con.add_argument("--field-min-salary", type=int, default=None,
                        help="default $49,000 Classic / $47,000 Showdown (auto-lowered for tiny pools)")
-    p_con.add_argument("--field-stack-mix", default="0.25,0.40,0.35",
-                       help="field share with 0,1,2+ of the QB's own WR/TE ('none' to disable)")
+    p_con.add_argument("--field-stack-mix", default=",".join(map(str, cs.DEFAULT_STACK_MIX)),
+                       help="field share with 0,1,2+ of the QB's own WR/TE ('none' to disable; "
+                            "default %(default)s, measured in real Millys)")
     p_con.add_argument("--contest-size", type=int, default=100_000)
     p_con.add_argument("--entry-fee", type=float, default=20.0)
     p_con.add_argument("--rake", type=float, default=0.15)
@@ -757,7 +758,9 @@ def main() -> None:
     p_dkr.add_argument("--holdout-trials", type=int, default=3000)
     p_dkr.add_argument("--field-size", type=int, default=20000)
     p_dkr.add_argument("--field-min-salary", type=int, default=None)
-    p_dkr.add_argument("--field-stack-mix", default="0.25,0.40,0.35")
+    p_dkr.add_argument("--field-stack-mix", default=",".join(map(str, cs.DEFAULT_STACK_MIX)),
+                       help="field share with 0,1,2+ of the QB's own WR/TE ('none' to disable; "
+                            "default %(default)s, measured in real Millys)")
     p_dkr.add_argument("--objective", choices=["roi", "top1"], default="roi")
     p_dkr.add_argument("--min-unique", type=int, default=2)
     p_dkr.add_argument("--dst-cap", type=float, default=0.22)

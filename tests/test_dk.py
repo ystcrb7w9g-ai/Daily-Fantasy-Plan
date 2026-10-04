@@ -309,3 +309,10 @@ def test_read_lines_infers_opponent_and_team_totals():
     pool, _ = dk.pool_from_entry_file(ef)
     pool, missing = dk.apply_lines(pool, lines.reset_index())
     assert missing == [] and pool["game_total"].notna().all()
+
+
+def test_cli_field_defaults_track_engine_defaults():
+    from dfs_engine import contest as cs
+    out = subprocess.run([sys.executable, "-m", "dfs_engine.cli", "dk-run", "--help"], cwd=ROOT,
+                         capture_output=True, text=True).stdout
+    assert ",".join(map(str, cs.DEFAULT_STACK_MIX)) in out.replace("\n", "").replace(" ", "")

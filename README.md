@@ -157,11 +157,13 @@ What it does:
    therefore duplicate the way real fields do. With this slice, a
    simulated 165k-entry Milly has 6.7% of entries in duplicated lineups
    and a top lineup at ~60–140 copies, versus 5.7–10.2% and 69–346 in real
-   2026 Millys. The rest are sampled from projected ownership. All are salary-legal and at least `--field-min-salary`
-   (default $49k Classic, $47k Showdown). They're resampled so that 25% /
-   40% / 35% pair the QB with 0 / 1 / 2+ of his own pass catchers
+   2026 Millys. The rest are sampled from projected ownership, all
+   salary-legal and at least `--field-min-salary` (default $49k Classic,
+   $47k Showdown). They're resampled so that 19% / 53% / 28% pair the QB
+   with 0 / 1 / 2+ of his own pass catchers, as measured in real Millys
    (`--field-stack-mix`). The sampling weights are then calibrated so the
-   field's ownership matches your `own` column.
+   whole field's ownership, optimizer slice included, matches your `own`
+   column.
 3. **Contest sim.** Scores candidates and field on a *separate* set of
    simulations (`--eval-trials`), so lineups aren't graded on the outcomes
    they were built from. Each sampled field lineup stands for
