@@ -110,3 +110,17 @@ def test_diagnostics_leverage_report_sums_to_one_optimal_pct(pool):
     assert (report["optimal_pct"] >= 0).all()
     assert (report["optimal_pct"] <= 1).all()
     assert "leverage" in report.columns
+
+
+def test_showdown_pool_accepts_kickers(tmp_path=None):
+    import tempfile
+    raw = pd.read_csv(POOL_PATH)
+    k = raw.iloc[0].copy()
+    k["name"], k["position"], k["salary"], k["proj"] = "A Kicker", "K", 4000, 8.0
+    raw = pd.concat([raw, k.to_frame().T], ignore_index=True)
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "sd.csv")
+        raw.to_csv(path, index=False)
+        pool = load_player_pool(path)
+    assert "K" in set(pool["position"])
+    assert solve_showdown(pool, pool["proj"].to_numpy()) is not None

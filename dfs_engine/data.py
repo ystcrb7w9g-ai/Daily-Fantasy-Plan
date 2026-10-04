@@ -27,7 +27,7 @@ REQUIRED_COLUMNS = [
     "team_total", "game_total", "spread",
 ]
 
-VALID_POSITIONS = {"QB", "RB", "WR", "TE", "DST"}
+VALID_POSITIONS = {"QB", "RB", "WR", "TE", "DST", "K"}  # K: Showdown only
 
 
 def load_player_pool(path: str) -> pd.DataFrame:
