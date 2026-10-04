@@ -100,6 +100,11 @@ def _stack_rules(args: argparse.Namespace) -> StackRules | None:
     if args.fmt != "classic":
         print("Note: stacking rules apply to Classic only; ignoring for Showdown.")
         return None
+    if getattr(args, "flex_stacks", False) and hasattr(args, "candidates"):  # contest / dk-run only
+        options = cs.flexible_stack_rules(rules)
+        print("Flexible stacks: candidates span " + ", ".join(
+            f"QB+{r.qb_stack}" + (f"+{r.bring_back}" if r.bring_back else "") for r in options))
+        return options
     return rules
 
 
@@ -147,6 +152,11 @@ def _add_stack_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--max-per-team", type=int, default=None, help="max players from one team")
     p.add_argument("--max-per-game", type=int, default=None,
                    help="max players from one game (e.g. 5 stops whole-game stacks)")
+    p.add_argument("--flex-stacks", action="store_true",
+                   help="treat --qb-stack/--bring-back as the MAXIMUM: candidates mix QB+1 .. QB+N, "
+                        "with and without the runback, and the contest sim picks (contest/dk-run)")
+    p.add_argument("--max-game-stack-share", type=float, default=None,
+                   help="max share of a contest's lineups with 4+ players from one game (contest/dk-run)")
 
 
 def cmd_build(args: argparse.Namespace) -> None:
@@ -298,6 +308,7 @@ def cmd_contest(args: argparse.Namespace) -> None:
     chosen = cs.select_portfolio(
         df, candidates, result, args.n_lineups, objective=args.objective,
         min_unique=args.min_unique, dst_cap=args.dst_cap, max_exposure=args.max_exposure,
+        max_game_stack_share=args.max_game_stack_share,
     )
     print(f"Selected {len(chosen)}/{args.n_lineups} lineups (objective={args.objective}).")
 
@@ -413,14 +424,17 @@ def _contest_payout(row) -> "cs.PayoutCurve":
 
 
 def _pick_for_contest(df, candidates, result, n, args, exclude=frozenset()) -> list[int]:
+    share = getattr(args, "max_game_stack_share", None)
     chosen = cs.select_portfolio(
         df, candidates, result, n, objective=args.objective, min_unique=args.min_unique,
         dst_cap=args.dst_cap, max_exposure=args.max_exposure, exclude=set(exclude),
+        max_game_stack_share=share,
     )
     if len(chosen) < n:  # caps/uniqueness too tight for this pool: relax, don't leave entries blank
         more = cs.select_portfolio(
             df, candidates, result, n - len(chosen), objective=args.objective, min_unique=1,
             dst_cap=1.0, max_exposure=1.0, tiered_caps=False, exclude=set(chosen) | set(exclude),
+            max_game_stack_share=share,
         )
         print(f"  note: only {len(chosen)} lineups fit the exposure/uniqueness rules; "
               f"filled {len(more)} more with relaxed rules")

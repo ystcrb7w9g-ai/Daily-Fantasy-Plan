@@ -152,12 +152,34 @@ def lineups_to_weights(lineups: list[LineupResult], n_players: int) -> np.ndarra
 # 1. Candidate generation
 # ---------------------------------------------------------------------------
 
+def flexible_stack_rules(rules: StackRules) -> list[StackRules]:
+    """
+    Every stack structure up to `rules`' QB stack and bring-back, with its
+    caps (max per game / team, max vs DST) kept on all of them. E.g. QB+2
+    with a 1-player bring-back expands to QB+1, QB+1+1, QB+2, QB+2+1.
+    """
+    from dataclasses import replace
+    top = max(rules.qb_stack, 1)
+    out = []
+    for k in range(1, top + 1):
+        for b in sorted({0, rules.bring_back}):
+            out.append(replace(rules, qb_stack=k, bring_back=b))
+    return out
+
+
+def max_game_stack(df: pd.DataFrame, lineup: LineupResult) -> int:
+    """Most players this lineup has from any single game."""
+    from .optimize import _game_keys
+    _, counts = np.unique(_game_keys(df)[lineup.player_ids], return_counts=True)
+    return int(counts.max())
+
+
 def generate_candidates(
     df: pd.DataFrame,
     scores: np.ndarray,
     n_candidates: int,
     fmt: str = "classic",
-    stack_rules: StackRules | None = None,
+    stack_rules: StackRules | list[StackRules] | None = None,
     mix_range: tuple[float, float] = (0.3, 1.0),
     seed: int | None = None,
     max_solves: int | None = None,
@@ -166,7 +188,12 @@ def generate_candidates(
     """
     Distinct lineups, each optimal for `(1 - m) * proj + m * trial` with a
     random simulated trial and a random mix m ~ U(mix_range).
+
+    `stack_rules` may be a list of rule sets (see `flexible_stack_rules`):
+    each solve then uses one of them in turn, so the pool spans stack
+    structures and the contest sim decides which ones are worth playing.
     """
+    rule_sets = stack_rules if isinstance(stack_rules, list) else [stack_rules]
     rng = np.random.default_rng(seed)
     proj = df["proj"].to_numpy(dtype=float)
     max_solves = max_solves or 3 * n_candidates
@@ -178,7 +205,7 @@ def generate_candidates(
         m = rng.uniform(*mix_range)
         pts = (1 - m) * proj + m * scores[rng.integers(len(scores))]
         if fmt == "classic":
-            lu = solve_classic(df, pts, stack_rules=stack_rules)
+            lu = solve_classic(df, pts, stack_rules=rule_sets[solve_i % len(rule_sets)])
         else:
             lu = solve_showdown(df, pts)
         if lu is None:
@@ -678,6 +705,8 @@ def select_portfolio(
     max_exposure: float = 1.0,
     tiered_caps: bool = True,
     exclude: set[int] | None = None,
+    max_game_stack_share: float | None = None,
+    game_stack_size: int = 4,
 ) -> list[int]:
     """
     Greedy portfolio pick; returns candidate indices in selection order.
@@ -691,6 +720,8 @@ def select_portfolio(
     global `max_exposure`; lineups must differ from every pick by at least
     `min_unique` players. `tiered_caps=False` drops the ownership tiers
     (keeping `dst_cap` / `max_exposure`); `exclude` skips candidate indices.
+    `max_game_stack_share` caps the share of picks with `game_stack_size`+
+    players from one game (big game stacks only where they earn a spot).
     """
     if objective not in ("roi", "top1"):
         raise ValueError("objective must be 'roi' or 'top1'")
@@ -701,6 +732,10 @@ def select_portfolio(
     max_count = np.maximum(1, np.floor(caps * n_lineups)).astype(int)
 
     ev = result.payouts.mean(axis=0).astype(np.float64)
+    is_big = np.array([max_game_stack(df, c) >= game_stack_size for c in candidates]) \
+        if max_game_stack_share is not None else np.zeros(len(candidates), dtype=bool)
+    max_big = int(np.floor(max_game_stack_share * n_lineups)) if max_game_stack_share is not None else 0
+    n_big = 0
     sets = [set(c.player_ids) for c in candidates]
     counts = np.zeros(n_players, dtype=int)
     chosen: list[int] = []
@@ -722,6 +757,9 @@ def select_portfolio(
             if not available[idx]:
                 break
             ids = candidates[idx].player_ids
+            if is_big[idx] and n_big >= max_big:
+                available[idx] = False
+                continue
             ok = (counts[ids] < max_count[ids]).all() and all(
                 len(sets[idx] ^ sets[j]) >= 2 * min_unique for j in chosen
             )
@@ -732,6 +770,7 @@ def select_portfolio(
         if picked is None:
             break
         chosen.append(int(picked))
+        n_big += int(is_big[picked])
         available[picked] = False
         counts[candidates[picked].player_ids] += 1
         if objective == "top1":

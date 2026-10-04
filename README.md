@@ -118,6 +118,13 @@ applied to every MILP solve:
 | `--max-vs-dst N` | at most N offensive players facing your DST (`0` = never) |
 | `--max-per-team N` | at most N players from any one team |
 | `--max-per-game N` | at most N players from any one game (5 stops whole-game stacks) |
+| `--flex-stacks` | `contest`/`dk-run`: treat `--qb-stack`/`--bring-back` as the *maximum*; candidates span QB+1 … QB+N, with and without the runback, and the contest sim picks the structure |
+| `--max-game-stack-share X` | `contest`/`dk-run`: at most share X of a contest's lineups with 4+ players from one game |
+
+Example (what we'd use next week): `--qb-stack 2 --bring-back 1 --flex-stacks
+--max-per-game 4 --max-per-team 3 --max-vs-dst 0 --max-game-stack-share 0.5`.
+Without `--flex-stacks`, QB+2 plus a runback forces every lineup to carry
+four players from one game.
 
 ```bash
 python -m dfs_engine.cli build --pool data/week5_players.csv \

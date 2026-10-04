@@ -201,3 +201,32 @@ def test_duplicated_field_lineups_raise_candidate_dupes():
     scores = simulate_player_scores(df, n_trials=200, seed=23)
     res = cs.simulate_contest(chalk, field, scores, cs.gpp_payout_curve(30_000, 10.0))
     assert res.metrics["exp_dupes"].iloc[0] >= top[1] * (30_000 - 1) / 3000 - 1e-6
+
+
+def test_flexible_stack_rules_expand_and_keep_caps():
+    rules = StackRules(qb_stack=2, bring_back=1, max_per_game=4, max_per_team=3, max_vs_dst=0)
+    opts = cs.flexible_stack_rules(rules)
+    assert [(r.qb_stack, r.bring_back) for r in opts] == [(1, 0), (1, 1), (2, 0), (2, 1)]
+    assert all(r.max_per_game == 4 and r.max_per_team == 3 and r.max_vs_dst == 0 for r in opts)
+
+
+def test_flex_candidates_mix_structures_and_share_cap_limits_game_stacks():
+    import pandas as pd
+    a, b = _value_owned_pool(seed=0), _value_owned_pool(seed=1)
+    ren = {"AAA": "EEE", "BBB": "FFF", "CCC": "GGG", "DDD": "HHH"}
+    b["team"], b["opp"] = b["team"].map(ren), b["opp"].map(ren)
+    b["name"] = b["name"] + "_b"
+    df = pd.concat([a, b], ignore_index=True)
+    df["own"] = df["own"] / 2
+    df["player_id"] = df.index
+    rules = cs.flexible_stack_rules(StackRules(qb_stack=2, bring_back=1, max_per_game=4))
+    gen = simulate_player_scores(df, n_trials=300, seed=31)
+    cands = cs.generate_candidates(df, gen, 40, stack_rules=rules, seed=31)
+    sizes = [cs.max_game_stack(df, c) for c in cands]
+    assert max(sizes) <= 4 and min(sizes) < 4  # not every lineup is a 4-man game stack
+    ev = simulate_player_scores(df, n_trials=400, seed=32)
+    field = cs.generate_field(df, 2000, seed=33)
+    res = cs.simulate_contest(cs.lineups_to_weights(cands, len(df)), field, ev, cs.gpp_payout_curve(20_000, 10.0))
+    chosen = cs.select_portfolio(df, cands, res, 10, min_unique=1, max_game_stack_share=0.3)
+    assert len(chosen) > 0
+    assert sum(cs.max_game_stack(df, cands[i]) >= 4 for i in chosen) <= 3
