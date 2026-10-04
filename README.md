@@ -123,6 +123,70 @@ can make every lineup infeasible. The bundled one-game sample, for
 example, can't satisfy `--max-vs-dst` at all, and the builder then
 reports 0 lineups.
 
+### Contest sim + portfolio selection (SaberSim-style)
+
+`build` picks lineups that are optimal in individual simulations. `contest`
+goes further, the way SaberSim and Stokastic's contest sims do: it grades
+lineups against a simulated **field** under the contest's **payout
+structure**, then picks the portfolio from those results.
+
+```bash
+python -m dfs_engine.cli contest \
+    --pool data/week5_players_sgo.csv \
+    --n-lineups 150 --candidates 3000 \
+    --contest-size 200000 --entry-fee 20 \
+    --qb-stack 2 --bring-back 1 --objective roi \
+    --out portfolio.csv --candidates-out candidates.csv --exposure-out exposure.csv
+```
+
+What it does:
+
+1. **Candidates.** Builds `--candidates` distinct lineups. Each one is
+   MILP-optimal for a blend of the median projection and one simulated
+   outcome, with a random blend weight, so the pool runs from safe builds to
+   boom-or-bust ones. Stacking rules apply.
+2. **Field.** Samples `--field-size` opponent lineups from projected
+   ownership. All are salary-legal and at least `--field-min-salary`
+   (default $49k Classic, $47k Showdown). They're resampled so that 25% /
+   40% / 35% pair the QB with 0 / 1 / 2+ of his own pass catchers
+   (`--field-stack-mix`). The sampling weights are then calibrated so the
+   field's ownership matches your `own` column.
+3. **Contest sim.** Scores candidates and field on a *separate* set of
+   simulations (`--eval-trials`), so lineups aren't graded on the outcomes
+   they were built from. Each sampled field lineup stands for
+   `contest_size / field_size` real entries. A finish therefore covers a
+   window of ranks, and the lineup is paid the average prize across it.
+   Ties and duplicates widen the window, which splits prizes the way
+   DraftKings does.
+4. **Portfolio.** Greedy selection under the same ownership-tiered
+   exposure caps as `build`, plus `--max-exposure` and `--min-unique`.
+   - `--objective roi` takes the highest expected payout first.
+   - `--objective top1` makes each pick maximize the share of simulations
+     where *some* entry finishes top 1%. That favors lineups that win in
+     different outcomes, so it's better for diversified mass-multi-entry.
+5. **Holdout.** The chosen portfolio is re-graded on fresh simulations
+   (`--holdout-trials`), so the reported ROI isn't inflated by having
+   picked the luckiest of thousands.
+
+Payouts: by default a stylized top-heavy curve (`--rake`, `--paid-frac`,
+`--first-frac`, `--min-cash-mult`). For a real contest, pass its payout
+table: `--payouts payouts.csv` with columns `rank_min,rank_max,payout`.
+
+Each lineup in `portfolio.csv` gets `exp_payout`, `roi`, `top1_pct`,
+`cash_pct`, `win_pct`, `exp_dupes`, `holdout_roi` and `holdout_top1_pct`.
+`exposure.csv` adds `field_own` (the simulated field's realized
+ownership) next to your exposure.
+
+**Read the ROI as a ranking, not a forecast.** The field is sampled from
+ownership; it isn't a model of real opponents' skill. And candidates are
+graded by the same projections they were optimized for, so absolute ROI
+comes out optimistic, as in every sim tool. The comparisons between
+lineups (ROI, top-1%, duplication) are the useful signal.
+
+Runtime: candidate generation dominates at ~40 ms per MILP solve, or
+~115 ms with stacking rules on a full slate. So `--candidates 3000` takes
+about 2–6 minutes. Field sampling and the contest sim take seconds.
+
 ### Pull in SportsGameOdds lines + prop-based baseline projections
 
 [SportsGameOdds](https://sportsgameodds.com) aggregates sportsbook odds and
@@ -207,6 +271,7 @@ dfs_engine/
   simulate.py     # correlated Monte Carlo player-score simulation (+ ceiling calibration)
   optimize.py     # MILP solver (Classic + Showdown) + stacking rules
   outcomes.py     # per-player median/p85/p99/boom/bust/Optimal% report
+  contest.py      # candidates, ownership-sampled field, contest sim, portfolio selection
   portfolio.py    # N-lineup portfolio builder (exposure caps, uniqueness)
   diagnostics.py  # Optimal% leverage diagnostic
   sportsgameodds.py # SportsGameOdds fetch, game lines, prop -> DK baseline
@@ -215,6 +280,7 @@ tests/
   test_engine.py  # pytest-style tests
   test_sportsgameodds.py
   test_sim_tools.py  # ceiling calibration, outcomes report, stacking rules
+  test_contest.py    # payouts, field sampler, contest sim, portfolio selection
   run_tests.py    # standalone runner (no pytest dependency)
 data/
   sample_classic_pool.csv
@@ -231,7 +297,7 @@ python3 tests/run_tests.py
 
 ## Known limitations
 
-- **Exposure/portfolio construction** is a greedy heuristic (draw a
+- **Exposure/portfolio construction** (both `build` and `contest`) is a greedy heuristic (draw a
   trial, solve, accept if it satisfies caps/uniqueness), not a globally
   optimal portfolio solve. On very small or thin player pools this can
   hit a genuine combinatorial ceiling (fewer unique lineups available
@@ -241,10 +307,8 @@ python3 tests/run_tests.py
   projections come only from the SportsGameOdds prop baseline above. For
   best results supply your own `proj` (from a paid provider or your
   model) and use SGO as the market baseline to blend against.
-- **ROI/EV against a real massive-field contest** (hundreds of thousands
-  of entries) is not implemented here. Estimating absolute payout
-  probabilities against a field that large requires realistically
-  modeling the *skill and strategy distribution* of the entire field,
-  which is a much harder problem than this engine solves; relative
-  lineup ranking (by simulated equity / Optimal%) is the more reliable
-  signal this pipeline can give you.
+- **Contest-sim ROI is optimistic in absolute terms.** The `contest`
+  field is sampled from ownership with a stacking mix; it doesn't model
+  the real field's skill or strategy distribution. Use simulated ROI /
+  top-1% to *rank* lineups, not as an expected return. Our own entries
+  also don't compete with each other in the sim.

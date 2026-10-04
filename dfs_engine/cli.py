@@ -19,7 +19,13 @@ Player outcome table (median / p85 / p99 / boom% / bust% / Optimal%):
     python -m dfs_engine.cli outcomes --pool data/week4_players.csv \\
         --trials 20000 --optimal-trials 2000 --out outcomes.csv
 
-Stacking rules (Classic) work on build / diagnose / outcomes:
+Contest sim + portfolio selection (candidates -> field -> sim -> pick):
+
+    python -m dfs_engine.cli contest --pool data/week4_players.csv \\
+        --n-lineups 150 --candidates 3000 --contest-size 200000 --entry-fee 20 \\
+        --qb-stack 2 --bring-back 1 --objective roi --out portfolio.csv
+
+Stacking rules (Classic) work on build / diagnose / outcomes / contest:
 
     --qb-stack 2 --bring-back 1 --max-vs-dst 0 --max-per-team 4
 
@@ -42,6 +48,7 @@ from .data import load_player_pool, validate_showdown_pool
 from .simulate import simulate_player_scores
 from .optimize import StackRules
 from .outcomes import player_outcomes
+from . import contest as cs
 from .portfolio import build_portfolio, exposure_report
 from .diagnostics import run_optimal_pct_chunk, leverage_report
 from . import sportsgameodds as sgo
@@ -179,6 +186,99 @@ def cmd_outcomes(args: argparse.Namespace) -> None:
     print(f"Wrote player outcome report to {args.out}")
 
 
+def _parse_stack_mix(text: str):
+    if text.strip().lower() == "none":
+        return None
+    mix = tuple(float(x) for x in text.split(","))
+    if len(mix) != 3:
+        raise SystemExit("--field-stack-mix needs three comma-separated shares (0, 1, 2+ stacked)")
+    return mix
+
+
+def cmd_contest(args: argparse.Namespace) -> None:
+    df = load_player_pool(args.pool)
+    if args.fmt == "showdown":
+        validate_showdown_pool(df)
+    rules = _stack_rules(args)
+    seed = args.seed
+
+    if args.payouts:
+        payout = cs.load_payout_csv(args.payouts, args.entry_fee, args.contest_size)
+    else:
+        payout = cs.gpp_payout_curve(
+            args.contest_size, args.entry_fee, rake=args.rake, paid_frac=args.paid_frac,
+            first_frac=args.first_frac, min_cash_mult=args.min_cash_mult,
+        )
+    print(f"Contest: {payout.contest_size:,} entries, ${payout.entry_fee:g} fee, "
+          f"{payout.paid_places:,} paid, 1st ${payout.payouts[0]:,.0f}")
+
+    # Candidates and grading use independent sims so lineups aren't graded
+    # on the same outcomes they were optimized for.
+    print(f"Simulating {args.gen_trials} generation + {args.eval_trials} evaluation "
+          f"+ {args.holdout_trials} holdout trials...")
+    gen_scores = _simulate(df, args, args.gen_trials, seed)
+    eval_scores = _simulate(df, args, args.eval_trials, None if seed is None else seed + 1)
+    holdout_scores = _simulate(df, args, args.holdout_trials, None if seed is None else seed + 3)
+
+    print(f"Generating {args.candidates} candidate lineups...")
+    candidates = cs.generate_candidates(
+        df, gen_scores, args.candidates, fmt=args.fmt, stack_rules=rules,
+        seed=seed, progress=True,
+    )
+    print(f"  {len(candidates)} distinct candidates")
+
+    print(f"Sampling a {args.field_size:,}-lineup field from ownership...")
+    field = cs.generate_field(
+        df, args.field_size, fmt=args.fmt, min_salary=args.field_min_salary,
+        stack_mix=_parse_stack_mix(args.field_stack_mix), seed=None if seed is None else seed + 2,
+    )
+
+    print("Simulating contest...")
+    cand_w = cs.lineups_to_weights(candidates, len(df))
+    result = cs.simulate_contest(cand_w, field, eval_scores, payout)
+
+    chosen = cs.select_portfolio(
+        df, candidates, result, args.n_lineups, objective=args.objective,
+        min_unique=args.min_unique, dst_cap=args.dst_cap, max_exposure=args.max_exposure,
+    )
+    print(f"Selected {len(chosen)}/{args.n_lineups} lineups (objective={args.objective}).")
+
+    # Re-grade the chosen lineups on fresh sims: selecting the best of
+    # thousands on one sim set overstates them (winner's curse).
+    holdout = None
+    if chosen:
+        holdout = cs.simulate_contest(cand_w[chosen], field, holdout_scores, payout)
+        sel = cs.portfolio_summary(result, chosen, payout.entry_fee)
+        hold = cs.portfolio_summary(holdout, list(range(len(chosen))), payout.entry_fee)
+        print(f"  selection sims: ROI {sel['roi']:+.1%}, P(any top-1%) {sel['p_any_top1']:.1%}")
+        print(f"  holdout sims:   ROI {hold['roi']:+.1%}, P(any top-1%) {hold['p_any_top1']:.1%}, "
+              f"P(profit) {hold['p_profit']:.1%}")
+        print("  (ROI vs an ownership-sampled field is optimistic; use it to rank, not to bank.)")
+
+    lineup_df = _lineups_to_dataframe(df, [candidates[i] for i in chosen], args.fmt)
+    metrics = result.metrics.iloc[chosen].reset_index(drop=True).round(4)
+    if holdout is not None:
+        metrics["holdout_roi"] = holdout.metrics["roi"].round(4).to_numpy()
+        metrics["holdout_top1_pct"] = holdout.metrics["top1_pct"].round(4).to_numpy()
+    pd.concat([lineup_df, metrics], axis=1).to_csv(args.out, index=False)
+    print(f"Wrote portfolio to {args.out}")
+
+    if args.candidates_out:
+        all_df = _lineups_to_dataframe(df, candidates, args.fmt).drop(columns="lineup_id")
+        all_df = pd.concat([all_df, result.metrics.round(4)], axis=1)
+        all_df["selected"] = False
+        all_df.loc[chosen, "selected"] = True
+        all_df.sort_values("roi", ascending=False).to_csv(args.candidates_out, index=False)
+        print(f"Wrote {len(candidates)} graded candidates to {args.candidates_out}")
+
+    if args.exposure_out and chosen:
+        exp_df = exposure_report(df, [candidates[i] for i in chosen])
+        field_own = pd.Series((field > 0).mean(axis=0), index=df["name"])
+        exp_df["field_own"] = exp_df["name"].map(field_own).round(4)
+        exp_df.to_csv(args.exposure_out, index=False)
+        print(f"Wrote exposure report to {args.exposure_out}")
+
+
 def _fetch_sgo(args: argparse.Namespace) -> list[dict]:
     events = sgo.fetch_events(
         api_key=args.api_key, league_id=args.league,
@@ -279,6 +379,41 @@ def main() -> None:
     _add_sim_args(p_out)
     _add_stack_args(p_out)
     p_out.set_defaults(func=cmd_outcomes)
+
+    p_con = sub.add_parser("contest", help="Candidate pool -> field sim -> contest sim -> portfolio")
+    p_con.add_argument("--pool", required=True)
+    p_con.add_argument("--fmt", choices=["classic", "showdown"], default="classic")
+    p_con.add_argument("--n-lineups", type=int, default=150)
+    p_con.add_argument("--candidates", type=int, default=2000, help="candidate lineups to generate")
+    p_con.add_argument("--gen-trials", type=int, default=5000, help="sims used to build candidates")
+    p_con.add_argument("--eval-trials", type=int, default=5000, help="independent sims used to grade them")
+    p_con.add_argument("--holdout-trials", type=int, default=3000,
+                       help="fresh sims to re-grade the chosen portfolio (honest ROI estimate)")
+    p_con.add_argument("--field-size", type=int, default=20000,
+                       help="sampled field lineups standing in for the contest")
+    p_con.add_argument("--field-min-salary", type=int, default=None,
+                       help="default $49,000 Classic / $47,000 Showdown (auto-lowered for tiny pools)")
+    p_con.add_argument("--field-stack-mix", default="0.25,0.40,0.35",
+                       help="field share with 0,1,2+ of the QB's own WR/TE ('none' to disable)")
+    p_con.add_argument("--contest-size", type=int, default=100_000)
+    p_con.add_argument("--entry-fee", type=float, default=20.0)
+    p_con.add_argument("--rake", type=float, default=0.15)
+    p_con.add_argument("--paid-frac", type=float, default=0.22)
+    p_con.add_argument("--first-frac", type=float, default=0.20, help="share of prize pool to 1st")
+    p_con.add_argument("--min-cash-mult", type=float, default=2.0)
+    p_con.add_argument("--payouts", default=None,
+                       help="real payout CSV (rank_min,rank_max,payout); overrides the stylized curve")
+    p_con.add_argument("--objective", choices=["roi", "top1"], default="roi")
+    p_con.add_argument("--min-unique", type=int, default=2)
+    p_con.add_argument("--dst-cap", type=float, default=0.22)
+    p_con.add_argument("--max-exposure", type=float, default=1.0)
+    p_con.add_argument("--seed", type=int, default=None)
+    p_con.add_argument("--out", required=True)
+    p_con.add_argument("--candidates-out", default=None)
+    p_con.add_argument("--exposure-out", default=None)
+    _add_sim_args(p_con)
+    _add_stack_args(p_con)
+    p_con.set_defaults(func=cmd_contest)
 
     p_fetch = sub.add_parser("sgo-fetch", help="Download SportsGameOdds events (lines + props) to JSON")
     _add_sgo_fetch_args(p_fetch)

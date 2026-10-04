@@ -11,6 +11,7 @@ Modules:
     optimize    -- MILP lineup solver (Classic + Showdown)
     outcomes    -- per-player median/ceiling/boom/bust/Optimal% report
     portfolio   -- build N lineups with exposure caps + uniqueness
+    contest     -- candidate pool, field sim, contest sim, portfolio selection
     diagnostics -- Optimal% leverage diagnostic (SaberSim-style)
     sportsgameodds -- SportsGameOdds lines + prop-implied baseline projections
 """
