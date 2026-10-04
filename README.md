@@ -283,9 +283,37 @@ flag totals far from 900% and positions that look too flat or too chalky.
 players are ranked within each position by value, projection and team
 total, and the k-th ranked player gets the real fields' k-th-ranked
 ownership. `--own-blend 0.3` mixes 30% of that estimate into provided
-ownership. The exports contain no salaries or pre-lock projections, so
-the ranking weights are judgment, not fitted. Prefer a published
-ownership projection.
+ownership, and `--own-sharpen 1.2` makes the provided chalk chalkier. The
+exports contain no salaries or pre-lock projections, so the ranking
+weights are judgment, not fitted. Prefer a published ownership
+projection; see `own-eval` below for how they compared on Week 2.
+
+### Scoring an ownership source (`own-eval`)
+
+```bash
+python -m dfs_engine.cli own-eval --projections week2_projections.csv \
+    --standings contest-standings-<week2 id>.zip
+```
+
+`own-eval` matches a past week's projection file to that week's actual
+results. It reports ownership correlation and average error (overall and
+by position), projection bias, and the error at several chalk-sharpening
+settings.
+
+On Week 2 of 2026 (148 players, GoingFor2-based file):
+- **Ownership:** correlation 0.85, average error 2.5 points, well
+  calibrated, but the heaviest chalk was under-projected (Bijan 38% vs
+  47% actual).
+- **Sharpening:** `--own-sharpen 1.2` lowered the error slightly (2.48 →
+  2.42) and held up when each position was left out in turn (4 of 5).
+- **Our fallback estimator:** clearly worse (correlation 0.58), and every
+  blend into GoingFor2 made it worse. Keep `--own-blend` at 0 when a real
+  ownership projection is available.
+- **Projections vs actual points:** correlation 0.55; RBs ran +3.3 points
+  and QBs +2.3 points high.
+
+One week is a small sample; score more weeks before trusting these
+settings.
 
 ### Pull in SportsGameOdds lines + prop-based baseline projections
 

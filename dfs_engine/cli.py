@@ -334,6 +334,10 @@ def cmd_dk_pool(args: argparse.Namespace) -> None:
             print(f"Estimated ownership for {int(given.isna().sum())} players without one "
                   "(value-ranked, real-Milly concentration curves)")
         pool.loc[pool["proj"].isna(), "own"] = np.nan
+    if args.own_sharpen and args.own_sharpen != 1.0:
+        given = pd.to_numeric(pool["own"], errors="coerce")
+        pool["own"] = ownership.sharpen_ownership(given, pool["position"], args.own_sharpen)
+        print(f"Sharpened ownership chalk (gamma={args.own_sharpen})")
     if args.lines:
         pool, no_line = dk.apply_lines(pool, dk.read_lines(args.lines, ef.players))
         print(f"Vegas lines set for {pool['team'].nunique() - len(no_line)} of {pool['team'].nunique()} teams"
@@ -517,6 +521,24 @@ def cmd_field_study(args: argparse.Namespace) -> None:
     print(f"Wrote field profile to {args.out}")
 
 
+def cmd_own_eval(args: argparse.Namespace) -> None:
+    proj = dk.read_projections(args.projections)
+    if "own" not in proj.columns:
+        raise SystemExit("The projections file has no ownership column")
+    actual = history.player_table(history.read_standings(args.standings))
+    r = ownership.evaluate_ownership(proj, actual)
+    print(f"Matched {r['matched']} players ({r['unmatched']} unmatched).")
+    print(f"Ownership: corr {r['own_corr']:.3f}, mean abs error {r['own_mae']:.1%}")
+    if "proj_corr" in r:
+        print(f"Projections vs actual points: corr {r['proj_corr']:.3f}, bias {r['proj_bias']:+.2f} pts")
+    for pos, v in r["by_position"].items():
+        print(f"  {pos:<3} n={v['n']:<3} own corr {v['own_corr']:.2f}  own MAE {v['own_mae']:.1%}  "
+              f"proj bias {v['proj_bias']:+.2f}")
+    best = min(r["gamma_mae"], key=r["gamma_mae"].get)
+    print("Chalk sharpening (dk-pool --own-sharpen): "
+          + ", ".join(f"{g}: {e:.2%}" for g, e in r["gamma_mae"].items()) + f"  -> best {best}")
+
+
 def _fetch_sgo(args: argparse.Namespace) -> list[dict]:
     events = sgo.fetch_events(
         api_key=args.api_key, league_id=args.league,
@@ -662,6 +684,9 @@ def main() -> None:
                        help="estimate ownership for players without one (fallback model)")
     p_dkp.add_argument("--own-blend", type=float, default=0.0,
                        help="blend this share of the estimate into provided ownership (0-1)")
+    p_dkp.add_argument("--own-sharpen", type=float, default=1.0,
+                       help="raise ownership to this power within each position (1.2 = chalkier); "
+                            "use own-eval on past weeks to choose it")
     p_dkp.add_argument("--lines", default=None,
                        help="Vegas lines CSV: team, spread, total (one team per game is enough)")
     p_dkp.add_argument("--out", required=True)
@@ -705,6 +730,11 @@ def main() -> None:
                       help="a DKEntries.csv whose player list maps names to teams (for stack mix)")
     p_fs.add_argument("--out", default="data/field_profile.json")
     p_fs.set_defaults(func=cmd_field_study)
+
+    p_oe = sub.add_parser("own-eval", help="Score a past week's projected ownership against actual results")
+    p_oe.add_argument("--projections", required=True, help="that week's projections/ownership file")
+    p_oe.add_argument("--standings", required=True, help="that week's contest-standings CSV/ZIP")
+    p_oe.set_defaults(func=cmd_own_eval)
 
     p_fetch = sub.add_parser("sgo-fetch", help="Download SportsGameOdds events (lines + props) to JSON")
     _add_sgo_fetch_args(p_fetch)

@@ -142,3 +142,24 @@ def test_calibrate_spread_skips_when_all_ceilings_given():
     sim = lambda d, n, seed, k: simulate_player_scores(d, n_trials=n, seed=seed, spread_scale=k)  # noqa: E731
     k, ratios, _ = cs.calibrate_spread(df, field, sim, n_trials=100)
     assert k is None and len(ratios) == 3
+
+
+def test_sharpen_ownership_keeps_totals_and_raises_chalk():
+    own = pd.Series([0.40, 0.20, 0.10, 0.30, 0.30])
+    pos = pd.Series(["RB", "RB", "RB", "QB", "QB"])
+    s = ownership.sharpen_ownership(own, pos, 1.5)
+    assert abs(s[pos == "RB"].sum() - 0.70) < 1e-9 and abs(s[pos == "QB"].sum() - 0.60) < 1e-9
+    assert s[0] > 0.40 and s[2] < 0.10
+    assert np.allclose(ownership.sharpen_ownership(own, pos, 1.0), own)
+
+
+def test_evaluate_ownership_scores_projection_file():
+    actual = pd.DataFrame({"name": ["A Guy", "B Guy", "C Guy", "D Guy"],
+                           "own": [0.50, 0.30, 0.10, 0.10], "fpts": [20.0, 10.0, 5.0, 8.0]})
+    proj = pd.DataFrame({"name": ["A Guy", "B Guy", "C Guy", "D Guy", "Nobody"],
+                         "position": ["RB"] * 5, "proj": [18.0, 12.0, 6.0, 7.0, 3.0],
+                         "own": [40.0, 30.0, 15.0, 15.0, 1.0]})
+    r = ownership.evaluate_ownership(proj, actual)
+    assert r["matched"] == 4 and r["unmatched"] == 1
+    assert r["own_corr"] > 0.9 and abs(r["own_mae"] - 0.05) < 1e-9
+    assert r["gamma_mae"][1.3] < r["gamma_mae"][1.0]  # under-projected chalk -> sharpening helps
