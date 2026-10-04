@@ -82,16 +82,19 @@ def gpp_payout_curve(
     paid_frac: float = 0.22,
     first_frac: float = 0.20,
     min_cash_mult: float = 2.0,
+    prize_pool: float | None = None,
 ) -> PayoutCurve:
     """
     Stylized top-heavy GPP curve (Milly Maker-like): the top `paid_frac`
     of entries cash, min-cash is `min_cash_mult` x entry fee, 1st place
     takes `first_frac` of the prize pool, and prizes decay as a power law
-    in rank between them.
+    in rank between them. Pass `prize_pool` when it's known (it then
+    overrides size x fee x (1 - rake)); freerolls (fee 0) need it.
     """
-    pool = contest_size * entry_fee * (1 - rake)
+    pool = prize_pool if prize_pool is not None else contest_size * entry_fee * (1 - rake)
     paid = max(1, int(contest_size * paid_frac))
-    min_cash = min_cash_mult * entry_fee
+    # Freerolls have no fee to multiply; give min-cash a quarter of an even split.
+    min_cash = min_cash_mult * entry_fee if entry_fee > 0 else 0.25 * pool / paid
     if paid * min_cash >= pool:
         raise ValueError("min-cash x paid places exceeds the prize pool; lower paid_frac/min_cash_mult")
     r = np.arange(1, paid + 1, dtype=float)
@@ -439,6 +442,82 @@ class ContestResult:
     top1: np.ndarray         # (n_sims, n_candidates) bool: finished in top 1%
 
 
+@dataclass
+class FieldRanks:
+    """
+    Contest-independent placement of candidates against the sampled field:
+    for each sim and candidate, how many field lineups scored strictly
+    higher / exactly equal. Computed once, then priced for any number of
+    contests (they differ only in size and payouts).
+    """
+    n_above: np.ndarray      # (n_sims, n_candidates) int32
+    n_equal: np.ndarray      # (n_sims, n_candidates) int32
+    n_field: int
+    cand_mean_pts: np.ndarray
+    field_dupe_counts: np.ndarray  # exact copies of each candidate in the field sample
+
+
+def rank_against_field(
+    cand_w: np.ndarray, field_w: np.ndarray, scores: np.ndarray, batch: int = 256,
+) -> FieldRanks:
+    n_sims = len(scores)
+    n_cand, n_field = len(cand_w), len(field_w)
+    n_above = np.zeros((n_sims, n_cand), dtype=np.int32)
+    n_equal = np.zeros((n_sims, n_cand), dtype=np.int32)
+    cand_pts = np.zeros(n_cand)
+    for s0 in range(0, n_sims, batch):
+        sc = scores[s0:s0 + batch].astype(np.float32)
+        b = len(sc)
+        # Round so identical lineups tie exactly despite BLAS summation order.
+        cs = np.round(sc @ cand_w.T, 2).astype(np.float64)
+        fs = np.sort(np.round(sc @ field_w.T, 2).astype(np.float64), axis=1)
+        # One flattened searchsorted across the batch via per-row offsets.
+        offset = (np.arange(b) * (fs.max() + cs.max() + 10.0))[:, None]
+        flat = (fs + offset).ravel()
+        q = (cs + offset).ravel()
+        row_base = np.arange(b)[:, None] * n_field
+        lo = np.searchsorted(flat, q, side="left").reshape(b, n_cand) - row_base
+        hi = np.searchsorted(flat, q, side="right").reshape(b, n_cand) - row_base
+        n_above[s0:s0 + b] = n_field - hi
+        n_equal[s0:s0 + b] = hi - lo
+        cand_pts += cs.sum(axis=0)
+
+    field_keys = Counter(map(bytes, (field_w * 2).astype(np.uint8)))
+    dupes = np.array([field_keys.get(bytes(r), 0) for r in (cand_w * 2).astype(np.uint8)])
+    return FieldRanks(n_above, n_equal, n_field, cand_pts / n_sims, dupes)
+
+
+def score_contest(ranks: FieldRanks, payout: PayoutCurve) -> ContestResult:
+    """Price precomputed field placements under one contest's size and payouts."""
+    scale = (payout.contest_size - 1) / ranks.n_field
+    top1_rank = max(1.0, 0.01 * payout.contest_size)
+
+    # Each sampled field lineup stands for `scale` real entries, so a
+    # candidate with k sampled lineups above it really sits somewhere in
+    # ranks [k * scale, (k + 1) * scale); duplicates/ties widen the window
+    # further. Pay the average prize across that window (paying the
+    # window's best rank would hand out 1st place every time a candidate
+    # beats the whole sample).
+    start = ranks.n_above * scale
+    length = max(scale, 1.0) + ranks.n_equal * scale
+    pay = payout.average_payout(start, length).astype(np.float32)
+    mid = start + 0.5 * length
+    top1 = mid < top1_rank
+
+    mean_pay = pay.mean(axis=0)
+    fee = payout.entry_fee
+    metrics = pd.DataFrame({
+        "sim_mean_pts": ranks.cand_mean_pts,
+        "exp_payout": mean_pay,
+        "roi": mean_pay / fee - 1.0 if fee > 0 else np.full(len(mean_pay), np.nan),
+        "top1_pct": top1.mean(axis=0),
+        "cash_pct": (mid < payout.paid_places).mean(axis=0),
+        "win_pct": ((ranks.n_above == 0) / length).mean(axis=0),
+        "exp_dupes": ranks.field_dupe_counts * scale,
+    })
+    return ContestResult(pay, metrics, top1)
+
+
 def simulate_contest(
     cand_w: np.ndarray,
     field_w: np.ndarray,
@@ -449,64 +528,9 @@ def simulate_contest(
     """
     Place every candidate against the sampled field in every simulated
     outcome and pay it from `payout`. Returns per-sim payouts plus a
-    metrics table (roi, top1_pct, cash_pct, win_pct, avg_dupes...).
+    metrics table (roi, top1_pct, cash_pct, win_pct, exp_dupes...).
     """
-    n_sims = len(scores)
-    n_cand, n_field = len(cand_w), len(field_w)
-    scale = (payout.contest_size - 1) / n_field
-    top1_rank = max(1.0, 0.01 * payout.contest_size)
-
-    pay = np.zeros((n_sims, n_cand), dtype=np.float32)
-    top1 = np.zeros((n_sims, n_cand), dtype=bool)
-    cash = np.zeros(n_cand)
-    win = np.zeros(n_cand)
-    cand_pts = np.zeros(n_cand)
-
-    for s0 in range(0, n_sims, batch):
-        sc = scores[s0:s0 + batch].astype(np.float32)
-        b = len(sc)
-        # Round so identical lineups tie exactly despite BLAS summation order.
-        cs = np.round(sc @ cand_w.T, 2).astype(np.float64)
-        fs = np.sort(np.round(sc @ field_w.T, 2).astype(np.float64), axis=1)
-        # One flattened searchsorted across the batch via per-row offsets.
-        offset = (np.arange(b) * (fs.max() + cs.max() + 10.0))[:, None]
-        flat = (fs + offset).ravel()
-        q = cs + offset
-        lo = np.searchsorted(flat, q.ravel(), side="left").reshape(b, n_cand) - np.arange(b)[:, None] * n_field
-        hi = np.searchsorted(flat, q.ravel(), side="right").reshape(b, n_cand) - np.arange(b)[:, None] * n_field
-        n_above = n_field - hi
-        n_equal = hi - lo
-
-        # Each sampled field lineup stands for `scale` real entries, so a
-        # candidate with k sampled lineups above it really sits somewhere in
-        # ranks [k * scale, (k + 1) * scale); duplicates/ties widen the
-        # window further. Pay the average prize across that window (paying
-        # the window's best rank would hand out 1st place every time a
-        # candidate beats the whole sample).
-        start = n_above * scale
-        length = max(scale, 1.0) + n_equal * scale
-        pay[s0:s0 + b] = payout.average_payout(start, length)
-        mid = start + 0.5 * length
-        top1[s0:s0 + b] = mid < top1_rank
-        cash += (mid < payout.paid_places).sum(axis=0)
-        win += ((n_above == 0) / length).sum(axis=0)
-        cand_pts += cs.sum(axis=0)
-
-    # Expected duplicates of each candidate in the full contest.
-    field_keys = Counter(map(bytes, (field_w * 2).astype(np.uint8)))
-    dupes = np.array([field_keys.get(bytes(r), 0) for r in (cand_w * 2).astype(np.uint8)]) * scale
-
-    mean_pay = pay.mean(axis=0)
-    metrics = pd.DataFrame({
-        "sim_mean_pts": cand_pts / n_sims,
-        "exp_payout": mean_pay,
-        "roi": mean_pay / payout.entry_fee - 1.0,
-        "top1_pct": top1.mean(axis=0),
-        "cash_pct": cash / n_sims,
-        "win_pct": win / n_sims,
-        "exp_dupes": dupes,
-    })
-    return ContestResult(pay, metrics, top1)
+    return score_contest(rank_against_field(cand_w, field_w, scores, batch), payout)
 
 
 # ---------------------------------------------------------------------------
@@ -522,6 +546,8 @@ def select_portfolio(
     min_unique: int = 2,
     dst_cap: float = 0.22,
     max_exposure: float = 1.0,
+    tiered_caps: bool = True,
+    exclude: set[int] | None = None,
 ) -> list[int]:
     """
     Greedy portfolio pick; returns candidate indices in selection order.
@@ -533,14 +559,15 @@ def select_portfolio(
                        worlds), ties broken by expected payout.
     Exposure caps are the same ownership-tiered caps as `build`, plus a
     global `max_exposure`; lineups must differ from every pick by at least
-    `min_unique` players.
+    `min_unique` players. `tiered_caps=False` drops the ownership tiers
+    (keeping `dst_cap` / `max_exposure`); `exclude` skips candidate indices.
     """
     if objective not in ("roi", "top1"):
         raise ValueError("objective must be 'roi' or 'top1'")
     n_players = len(df)
     is_dst = (df["position"] == "DST").to_numpy()
-    caps = np.where(is_dst, dst_cap, df["own"].apply(default_exposure_cap).to_numpy())
-    caps = np.minimum(caps, max_exposure)
+    tiered = df["own"].apply(default_exposure_cap).to_numpy() if tiered_caps else np.ones(n_players)
+    caps = np.minimum(np.where(is_dst, dst_cap, tiered), max_exposure)
     max_count = np.maximum(1, np.floor(caps * n_lineups)).astype(int)
 
     ev = result.payouts.mean(axis=0).astype(np.float64)
@@ -548,6 +575,8 @@ def select_portfolio(
     counts = np.zeros(n_players, dtype=int)
     chosen: list[int] = []
     available = np.ones(len(candidates), dtype=bool)
+    if exclude:
+        available[list(exclude)] = False
     covered = np.zeros(result.top1.shape[0], dtype=np.float32)
     top1_f = result.top1.astype(np.float32) if objective == "top1" else None
 
@@ -588,8 +617,9 @@ def portfolio_summary(result: ContestResult, chosen: list[int], entry_fee: float
     cost = entry_fee * len(chosen)
     return {
         "n_lineups": len(chosen),
+        "exp_payout": float(pay.mean()),
         "exp_profit": float(pay.mean() - cost),
-        "roi": float(pay.mean() / cost - 1.0),
+        "roi": float(pay.mean() / cost - 1.0) if cost > 0 else float("nan"),
         "p_any_top1": float(result.top1[:, chosen].any(axis=1).mean()),
         "p_profit": float((pay > cost).mean()),
     }

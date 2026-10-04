@@ -187,6 +187,56 @@ Runtime: candidate generation dominates at ~40 ms per MILP solve, or
 ~115 ms with stacking rules on a full slate. So `--candidates 3000` takes
 about 2–6 minutes. Field sampling and the contest sim take seconds.
 
+### DraftKings entry file → upload file
+
+Download your entries from DraftKings (Lineups → Edit Entries → Download →
+`DKEntries.csv`). That file holds every entry you've reserved *and* the
+slate's full player list with DraftKings IDs. The `dk-*` commands turn it
+into an upload-ready file:
+
+```bash
+# 1. Pool with DK IDs + kickoff times, merged with your projections
+#    (CSV with name, proj and optionally team, position, own, ceiling)
+python -m dfs_engine.cli dk-pool --entries DKEntries.csv \
+    --projections my_projections.csv --out data/main_pool.csv
+
+# 2. Vegas lines (+ prop baseline) from SportsGameOdds
+python -m dfs_engine.cli sgo-enrich --pool data/main_pool.csv \
+    --events data/main_sgo.json --out data/main_pool_sgo.csv
+
+# 3. Contest size/payout estimates (edit to match the DK lobby)
+python -m dfs_engine.cli dk-contests --entries DKEntries.csv --out contests.csv
+
+# 4. Optimize every entry and write the upload file
+python -m dfs_engine.cli dk-run --pool data/main_pool_sgo.csv \
+    --entries DKEntries.csv --contests contests.csv \
+    --qb-stack 2 --bring-back 1 \
+    --upload-out dk_upload.csv --report-out entry_report.csv --exposure-out exposure.csv
+```
+
+Then upload `dk_upload.csv` on DraftKings' Edit Entries page.
+
+- **One candidate pool and one field are shared** by every contest in the
+  file. Each contest is priced under its own size and payout curve, and
+  gets its own portfolio for the number of entries you hold in it.
+- **Contest estimates.** `dk-contests` parses the prize pool from each
+  contest name ("$2.75M", "[$1M to 1st]") and estimates size as prize
+  pool ÷ (fee × (1 − rake)). Freerolls have no fee, so their size is a
+  marked guess. Edit `contest_size`, `first_frac` and `paid_frac`, or set
+  `payouts_file` to a `rank_min,rank_max,payout` CSV.
+- **The upload file** uses player IDs only (as DraftKings asks) and copies
+  the entry columns verbatim. Every lineup is re-checked against DK's
+  Classic rules: salary, slots, and at least 2 games.
+- **FLEX for late swap.** FLEX holds the latest-kickoff player of the
+  position with an extra body, which keeps late-swap options open.
+- **Reusing lineups across contests.** By default each contest takes its
+  own best lineups, so the same lineup can appear in several contests.
+  `--unique-across-contests` forbids that; the highest-fee contest picks
+  first.
+- **Missing players.** Players without a projection are dropped at load,
+  and those without ownership count as 0%. `dk-run` warns if most
+  ownership is missing, since the simulated field depends on it.
+
 ### Pull in SportsGameOdds lines + prop-based baseline projections
 
 [SportsGameOdds](https://sportsgameodds.com) aggregates sportsbook odds and
@@ -254,6 +304,8 @@ Required columns: `name, team, opp, position, salary, proj, own, ceiling,
 team_total, game_total, spread`.
 
 - `position` must be one of `QB, RB, WR, TE, DST`.
+- Rows with a blank or zero `proj` are dropped at load, so a full DK player
+  list can be used directly; a blank `own` counts as 0%.
 - `own` (projected ownership) can be given as a fraction (`0.18`) or a
   percentage (`18.0`) — the loader auto-detects and normalizes to a
   fraction.
@@ -269,9 +321,10 @@ See `data/sample_classic_pool.csv` for a worked example (one game,
 dfs_engine/
   data.py         # CSV loading + validation
   simulate.py     # correlated Monte Carlo player-score simulation (+ ceiling calibration)
-  optimize.py     # MILP solver (Classic + Showdown) + stacking rules
+  optimize.py     # MILP solver (Classic + Showdown, DK game/team rules) + stacking rules
   outcomes.py     # per-player median/p85/p99/boom/bust/Optimal% report
   contest.py      # candidates, ownership-sampled field, contest sim, portfolio selection
+  dk.py           # DraftKings entry file: parse, pool + projections merge, slots, upload
   portfolio.py    # N-lineup portfolio builder (exposure caps, uniqueness)
   diagnostics.py  # Optimal% leverage diagnostic
   sportsgameodds.py # SportsGameOdds fetch, game lines, prop -> DK baseline
@@ -281,6 +334,7 @@ tests/
   test_sportsgameodds.py
   test_sim_tools.py  # ceiling calibration, outcomes report, stacking rules
   test_contest.py    # payouts, field sampler, contest sim, portfolio selection
+  test_dk.py         # entry-file parsing, matching, DK roster rules, upload, dk-run end to end
   run_tests.py    # standalone runner (no pytest dependency)
 data/
   sample_classic_pool.csv

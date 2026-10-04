@@ -25,7 +25,18 @@ Contest sim + portfolio selection (candidates -> field -> sim -> pick):
         --n-lineups 150 --candidates 3000 --contest-size 200000 --entry-fee 20 \\
         --qb-stack 2 --bring-back 1 --objective roi --out portfolio.csv
 
-Stacking rules (Classic) work on build / diagnose / outcomes / contest:
+DraftKings entry file -> pool -> optimized lineups -> upload file:
+
+    python -m dfs_engine.cli dk-pool --entries DKEntries.csv \\
+        --projections my_projections.csv --out data/main_pool.csv
+    python -m dfs_engine.cli sgo-enrich --pool data/main_pool.csv \\
+        --events data/main_sgo.json --out data/main_pool_sgo.csv
+    python -m dfs_engine.cli dk-contests --entries DKEntries.csv --out contests.csv
+    python -m dfs_engine.cli dk-run --pool data/main_pool_sgo.csv \\
+        --entries DKEntries.csv --contests contests.csv \\
+        --qb-stack 2 --bring-back 1 --upload-out dk_upload.csv
+
+Stacking rules (Classic) work on build / diagnose / outcomes / contest / dk-run:
 
     --qb-stack 2 --bring-back 1 --max-vs-dst 0 --max-per-team 4
 
@@ -49,6 +60,7 @@ from .simulate import simulate_player_scores
 from .optimize import StackRules
 from .outcomes import player_outcomes
 from . import contest as cs
+from . import dk
 from .portfolio import build_portfolio, exposure_report
 from .diagnostics import run_optimal_pct_chunk, leverage_report
 from . import sportsgameodds as sgo
@@ -279,6 +291,152 @@ def cmd_contest(args: argparse.Namespace) -> None:
         print(f"Wrote exposure report to {args.exposure_out}")
 
 
+def cmd_dk_pool(args: argparse.Namespace) -> None:
+    ef = dk.read_entry_file(args.entries)
+    projections = pd.read_csv(args.projections, encoding="utf-8-sig") if args.projections else None
+    pool, unmatched = dk.pool_from_entry_file(ef, projections)
+    pool.to_csv(args.out, index=False)
+    games = ef.players["game"].nunique()
+    print(f"{len(ef.entries)} entries in {ef.entries['contest_id'].nunique()} contests; "
+          f"{len(pool)} players across {games} games.")
+    if projections is not None:
+        print(f"Projections matched for {int(pool['proj'].notna().sum())} players.")
+        if unmatched:
+            print(f"  not on this slate / unmatched ({len(unmatched)}): {', '.join(unmatched[:25])}"
+                  + (" ..." if len(unmatched) > 25 else ""))
+    else:
+        print("No --projections given: proj/own/ceiling are blank (sgo-enrich can fill proj).")
+    print(f"Wrote pool to {args.out}")
+
+
+def cmd_dk_contests(args: argparse.Namespace) -> None:
+    ef = dk.read_entry_file(args.entries)
+    table = dk.estimate_contests(ef.entries, rake=args.rake)
+    table.to_csv(args.out, index=False)
+    with pd.option_context("display.width", 200, "display.max_colwidth", 48):
+        print(table[["contest_id", "contest_name", "entry_fee", "our_entries",
+                     "contest_size", "first_frac", "size_source"]].to_string(index=False))
+    print(f"Wrote {args.out}: edit contest_size (and first_frac / paid_frac, or point "
+          "payouts_file at a rank_min,rank_max,payout CSV) to match the DK lobby.")
+
+
+def _contest_payout(row) -> "cs.PayoutCurve":
+    payouts_file = row.get("payouts_file")
+    if isinstance(payouts_file, str) and payouts_file.strip():
+        return cs.load_payout_csv(payouts_file.strip(), row["entry_fee"], int(row["contest_size"]))
+    pool = row.get("prize_pool")
+    return cs.gpp_payout_curve(
+        int(row["contest_size"]), float(row["entry_fee"]),
+        paid_frac=float(row.get("paid_frac", 0.22)), first_frac=float(row.get("first_frac", 0.20)),
+        prize_pool=float(pool) if pd.notna(pool) else None,
+    )
+
+
+def _pick_for_contest(df, candidates, result, n, args, exclude=frozenset()) -> list[int]:
+    chosen = cs.select_portfolio(
+        df, candidates, result, n, objective=args.objective, min_unique=args.min_unique,
+        dst_cap=args.dst_cap, max_exposure=args.max_exposure, exclude=set(exclude),
+    )
+    if len(chosen) < n:  # caps/uniqueness too tight for this pool: relax, don't leave entries blank
+        more = cs.select_portfolio(
+            df, candidates, result, n - len(chosen), objective=args.objective, min_unique=1,
+            dst_cap=1.0, max_exposure=1.0, tiered_caps=False, exclude=set(chosen) | set(exclude),
+        )
+        print(f"  note: only {len(chosen)} lineups fit the exposure/uniqueness rules; "
+              f"filled {len(more)} more with relaxed rules")
+        chosen += more
+    return chosen
+
+
+def cmd_dk_run(args: argparse.Namespace) -> None:
+    ef = dk.read_entry_file(args.entries)
+    df = load_player_pool(args.pool)
+    if "dk_id" not in df.columns or df["dk_id"].isna().any():
+        df, unmatched = dk.attach_dk_ids(df.drop(columns=["dk_id"], errors="ignore"), ef)
+        if unmatched:
+            print(f"Dropping {len(unmatched)} pool players not on this DK slate: {', '.join(unmatched[:20])}")
+        df = df[df["dk_id"].notna()].reset_index(drop=True)
+        df["player_id"] = df.index
+    df["dk_id"] = pd.to_numeric(df["dk_id"]).astype("int64").astype(str)
+    if (df["own"] <= 0).mean() > 0.5:
+        print("WARNING: most players have no ownership projection -- the simulated field "
+              "(and therefore ROI) will be close to meaningless. Supply `own`.")
+    rules = _stack_rules(args)
+    contests = pd.read_csv(args.contests) if args.contests else dk.estimate_contests(ef.entries)
+    contests["contest_id"] = contests["contest_id"].astype(str)
+    total = int(contests["our_entries"].sum())
+    print(f"{len(df)} projected players; {total} entries in {len(contests)} contests.")
+
+    seed = args.seed
+    sub_seed = (lambda k: None) if seed is None else (lambda k: seed + k)
+    print(f"Simulating {args.gen_trials} + {args.eval_trials} + {args.holdout_trials} trials...")
+    gen_scores = _simulate(df, args, args.gen_trials, seed)
+    eval_scores = _simulate(df, args, args.eval_trials, sub_seed(1))
+    holdout_scores = _simulate(df, args, args.holdout_trials, sub_seed(3))
+
+    n_cand = max(args.candidates, 3 * total)
+    print(f"Generating {n_cand} candidate lineups...")
+    candidates = cs.generate_candidates(df, gen_scores, n_cand, stack_rules=rules,
+                                        seed=seed, progress=True)
+    print(f"Sampling a {args.field_size:,}-lineup field from ownership...")
+    field = cs.generate_field(df, args.field_size, min_salary=args.field_min_salary,
+                              stack_mix=_parse_stack_mix(args.field_stack_mix), seed=sub_seed(2))
+    cand_w = cs.lineups_to_weights(candidates, len(df))
+    print("Ranking candidates against the field...")
+    ranks = cs.rank_against_field(cand_w, field, eval_scores)
+    hold_ranks = cs.rank_against_field(cand_w, field, holdout_scores)
+
+    slot_ids: dict[str, list[str]] = {}
+    report_rows, used, taken = [], [], set()
+    # Highest-stakes contests pick first (matters with --unique-across-contests).
+    contests = contests.sort_values(["entry_fee", "contest_size"], ascending=False, kind="stable")
+    for c in contests.itertuples(index=False):
+        row = c._asdict()
+        payout = _contest_payout(row)
+        n = int(row["our_entries"])
+        result = cs.score_contest(ranks, payout)
+        chosen = _pick_for_contest(df, candidates, result, n, args,
+                                   exclude=taken if args.unique_across_contests else frozenset())
+        taken.update(chosen)
+        hold = cs.score_contest(hold_ranks, payout)
+        summ = cs.portfolio_summary(hold, chosen, payout.entry_fee)
+        roi_txt = f"ROI {summ['roi']:+.0%}" if payout.entry_fee > 0 else f"exp payout ${summ['exp_payout']:.2f}"
+        print(f"{row['contest_name'][:48]:<48} {n:>3} entries  size {payout.contest_size:>7,}  "
+              f"holdout {roi_txt}, P(any top-1%) {summ['p_any_top1']:.0%}")
+
+        entry_ids = ef.entries.loc[ef.entries["contest_id"] == row["contest_id"], "entry_id"].tolist()
+        for entry_id, ci in zip(entry_ids, chosen):
+            lu = candidates[ci]
+            ids = dk.assign_slots(lu.player_ids, df)
+            dk.validate_upload_lineup(ids, ef.players)
+            slot_ids[entry_id] = ids
+            used.append(lu)
+            names = df.set_index("dk_id").loc[ids, "name"].tolist()
+            m = result.metrics.iloc[ci]
+            report_rows.append({
+                "entry_id": entry_id, "contest": row["contest_name"],
+                **dict(zip(dk.REPORT_SLOT_LABELS, names)),
+                "salary": lu.salary_used, "proj": round(lu.projected_points, 2),
+                "roi": round(m["roi"], 4), "top1_pct": round(m["top1_pct"], 4),
+                "holdout_roi": round(hold.metrics.iloc[ci]["roi"], 4),
+                "holdout_top1_pct": round(hold.metrics.iloc[ci]["top1_pct"], 4),
+                "exp_dupes": round(m["exp_dupes"], 2),
+            })
+        if len(chosen) < len(entry_ids):
+            print(f"  WARNING: {len(entry_ids) - len(chosen)} entries left unfilled")
+
+    n_written = dk.write_upload(ef, slot_ids, args.upload_out)
+    print(f"Wrote {n_written} lineups to {args.upload_out} (DraftKings upload format)")
+    if args.report_out:
+        pd.DataFrame(report_rows).to_csv(args.report_out, index=False)
+        print(f"Wrote entry report to {args.report_out}")
+    if args.exposure_out and used:
+        exp_df = exposure_report(df, used)
+        exp_df["field_own"] = exp_df["name"].map(pd.Series((field > 0).mean(axis=0), index=df["name"])).round(4)
+        exp_df.to_csv(args.exposure_out, index=False)
+        print(f"Wrote exposure report to {args.exposure_out}")
+
+
 def _fetch_sgo(args: argparse.Namespace) -> list[dict]:
     events = sgo.fetch_events(
         api_key=args.api_key, league_id=args.league,
@@ -414,6 +572,45 @@ def main() -> None:
     _add_sim_args(p_con)
     _add_stack_args(p_con)
     p_con.set_defaults(func=cmd_contest)
+
+    p_dkp = sub.add_parser("dk-pool", help="Player pool (with DK IDs) from a DraftKings entry file")
+    p_dkp.add_argument("--entries", required=True, help="DKEntries.csv downloaded from DraftKings")
+    p_dkp.add_argument("--projections", default=None,
+                       help="CSV with name, proj and optionally team, position, own, ceiling")
+    p_dkp.add_argument("--out", required=True)
+    p_dkp.set_defaults(func=cmd_dk_pool)
+
+    p_dkc = sub.add_parser("dk-contests", help="Editable contest size/payout estimates for an entry file")
+    p_dkc.add_argument("--entries", required=True)
+    p_dkc.add_argument("--rake", type=float, default=0.15)
+    p_dkc.add_argument("--out", required=True)
+    p_dkc.set_defaults(func=cmd_dk_contests)
+
+    p_dkr = sub.add_parser("dk-run", help="Optimize every entry in a DK entry file and write the upload CSV")
+    p_dkr.add_argument("--pool", required=True, help="pool with proj/own (+ dk_id from dk-pool)")
+    p_dkr.add_argument("--entries", required=True)
+    p_dkr.add_argument("--contests", default=None, help="contests CSV from dk-contests (edited)")
+    p_dkr.add_argument("--candidates", type=int, default=2000)
+    p_dkr.add_argument("--gen-trials", type=int, default=5000)
+    p_dkr.add_argument("--eval-trials", type=int, default=5000)
+    p_dkr.add_argument("--holdout-trials", type=int, default=3000)
+    p_dkr.add_argument("--field-size", type=int, default=20000)
+    p_dkr.add_argument("--field-min-salary", type=int, default=None)
+    p_dkr.add_argument("--field-stack-mix", default="0.25,0.40,0.35")
+    p_dkr.add_argument("--objective", choices=["roi", "top1"], default="roi")
+    p_dkr.add_argument("--min-unique", type=int, default=2)
+    p_dkr.add_argument("--dst-cap", type=float, default=0.22)
+    p_dkr.add_argument("--max-exposure", type=float, default=1.0)
+    p_dkr.add_argument("--unique-across-contests", action="store_true",
+                       help="never reuse a lineup in two contests (highest entry fee picks first)")
+    p_dkr.add_argument("--seed", type=int, default=None)
+    p_dkr.add_argument("--upload-out", required=True)
+    p_dkr.add_argument("--report-out", default=None)
+    p_dkr.add_argument("--exposure-out", default=None)
+    p_dkr.add_argument("--fmt", default="classic", help=argparse.SUPPRESS)
+    _add_sim_args(p_dkr)
+    _add_stack_args(p_dkr)
+    p_dkr.set_defaults(func=cmd_dk_run)
 
     p_fetch = sub.add_parser("sgo-fetch", help="Download SportsGameOdds events (lines + props) to JSON")
     _add_sgo_fetch_args(p_fetch)

@@ -12,6 +12,7 @@ Modules:
     outcomes    -- per-player median/ceiling/boom/bust/Optimal% report
     portfolio   -- build N lineups with exposure caps + uniqueness
     contest     -- candidate pool, field sim, contest sim, portfolio selection
+    dk          -- DraftKings entry file parsing, slot assignment, upload export
     diagnostics -- Optimal% leverage diagnostic (SaberSim-style)
     sportsgameodds -- SportsGameOdds lines + prop-implied baseline projections
 """

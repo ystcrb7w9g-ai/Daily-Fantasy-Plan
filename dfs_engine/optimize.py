@@ -2,9 +2,10 @@
 MILP exact-optimal lineup solver using scipy.optimize.milp (HiGHS).
 
 Supports:
-    - Classic: QB(1) RB(2-3) WR(3-4) TE(1-2) FLEX(RB/WR/TE) DST(1), 9 total, $50,000 cap
+    - Classic: QB(1) RB(2-3) WR(3-4) TE(1-2) FLEX(RB/WR/TE) DST(1), 9 total, $50,000 cap,
+      players from at least 2 different games (DraftKings rule)
     - Showdown: 1 Captain (1.5x salary + 1.5x points) + 5 FLEX, $50,000 cap,
-      single combined pool across both teams.
+      single combined pool across both teams, at least one player from each team.
 
 Classic lineups can additionally enforce SaberSim/Stokastic-style
 stacking rules via `StackRules` (QB stack, bring-back, no offense vs your
@@ -20,6 +21,14 @@ from scipy.optimize import LinearConstraint, Bounds, milp
 
 SALARY_CAP = 50_000
 CLASSIC_ROSTER_SIZE = 9
+
+
+def _game_keys(df: pd.DataFrame) -> np.ndarray:
+    """One key per game: the sorted team/opp pair."""
+    team = df["team"].to_numpy().astype(str)
+    opp = df["opp"].to_numpy().astype(str)
+    return np.where(team < opp, np.char.add(np.char.add(team, "@"), opp),
+                    np.char.add(np.char.add(opp, "@"), team))
 
 
 @dataclass
@@ -130,6 +139,11 @@ def solve_classic(
     A_rows.append(pos_mask("WR")); lb.append(3); ub.append(4)
     # TE between 1 and 2
     A_rows.append(pos_mask("TE")); lb.append(1); ub.append(2)
+    # DraftKings rule: players from at least 2 different games (<= 8 from any one)
+    game = _game_keys(df)
+    if len(np.unique(game)) > 1:
+        for g in np.unique(game):
+            A_rows.append((game == g).astype(float)); lb.append(0); ub.append(CLASSIC_ROSTER_SIZE - 1)
 
     for pid in locked_ids:
         row = np.zeros(n); row[pid] = 1
@@ -199,6 +213,12 @@ def solve_showdown(
     # salary cap
     row = np.concatenate([salary, cpt_salary])
     A_rows.append(row); lb.append(0); ub.append(SALARY_CAP)
+
+    # DraftKings rule: players from both teams (<= 5 of 6 from either one)
+    team = df["team"].to_numpy()
+    for t in np.unique(team):
+        row = np.concatenate([(team == t).astype(float)] * 2)
+        A_rows.append(row); lb.append(0); ub.append(5)
 
     # mutual exclusivity: flex_i + cpt_i <= 1 for each player
     for i in range(n):
