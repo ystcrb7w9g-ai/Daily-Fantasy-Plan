@@ -185,11 +185,29 @@ def solve_classic(
     )
 
 
+@dataclass
+class ShowdownRules:
+    """
+    Correlation rules for Showdown (all optional):
+
+    max_dst / max_k         : cap DSTs / kickers in the lineup.
+    no_same_team_rbs        : never two RBs from one team (backup RBs eat the starter's work).
+    qb_needs_catcher        : a QB must come with at least one of his own WR/TE.
+    catcher_cpt_needs_qb    : a WR/TE at Captain must come with his own QB.
+    """
+    max_dst: int | None = 1
+    max_k: int | None = None
+    no_same_team_rbs: bool = True
+    qb_needs_catcher: bool = True
+    catcher_cpt_needs_qb: bool = True
+
+
 def solve_showdown(
     df: pd.DataFrame,
     points: np.ndarray,
     locked_ids: set[int] | None = None,
     excluded_ids: set[int] | None = None,
+    rules: ShowdownRules | None = None,
 ) -> LineupResult | None:
     """
     Showdown solve: each player gets two decision variables, FLEX and
@@ -226,6 +244,28 @@ def solve_showdown(
     for t in np.unique(team):
         row = np.concatenate([(team == t).astype(float)] * 2)
         A_rows.append(row); lb.append(0); ub.append(5)
+
+    if rules is not None:
+        pos = df["position"].to_numpy()
+        both = lambda mask: np.concatenate([mask, mask]).astype(float)  # noqa: E731  flex+cpt
+        if rules.max_dst is not None:
+            A_rows.append(both(pos == "DST")); lb.append(0); ub.append(rules.max_dst)
+        if rules.max_k is not None:
+            A_rows.append(both(pos == "K")); lb.append(0); ub.append(rules.max_k)
+        for t in np.unique(team):
+            on = team == t
+            if rules.no_same_team_rbs and ((pos == "RB") & on).sum() > 1:
+                A_rows.append(both((pos == "RB") & on)); lb.append(0); ub.append(1)
+            qbs = np.where((pos == "QB") & on)[0]
+            catchers = np.isin(pos, ("WR", "TE")) & on
+            if rules.qb_needs_catcher:
+                for q in qbs:  # sum(own catchers) - QB >= 0
+                    row = both(catchers); row[q] -= 1; row[n + q] -= 1
+                    A_rows.append(row); lb.append(0); ub.append(np.inf)
+            if rules.catcher_cpt_needs_qb and len(qbs):
+                for pc in np.where(catchers)[0]:  # sum(own QBs) - CPT_pc >= 0
+                    row = both((pos == "QB") & on); row[n + pc] -= 1
+                    A_rows.append(row); lb.append(0); ub.append(np.inf)
 
     # mutual exclusivity: flex_i + cpt_i <= 1 for each player
     for i in range(n):

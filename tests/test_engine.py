@@ -124,3 +124,21 @@ def test_showdown_pool_accepts_kickers(tmp_path=None):
         pool = load_player_pool(path)
     assert "K" in set(pool["position"])
     assert solve_showdown(pool, pool["proj"].to_numpy()) is not None
+
+
+def test_showdown_rules_enforce_correlation():
+    from dfs_engine.optimize import ShowdownRules
+    pool = load_player_pool(POOL_PATH)
+    pool["salary"] = 1000
+    pts = pool["proj"].to_numpy().copy()
+    pts[pool["position"] == "DST"] = 40.0  # tempt a double-DST build
+    free = solve_showdown(pool, pts)
+    assert (pool.loc[free.player_ids, "position"] == "DST").sum() == 2
+    lu = solve_showdown(pool, pts, rules=ShowdownRules())
+    chosen = pool.loc[lu.player_ids]
+    assert (chosen["position"] == "DST").sum() <= 1
+    for t in chosen["team"].unique():
+        on = chosen[chosen["team"] == t]
+        assert (on["position"] == "RB").sum() <= 1
+        if (on["position"] == "QB").any():
+            assert on["position"].isin(["WR", "TE"]).any()
