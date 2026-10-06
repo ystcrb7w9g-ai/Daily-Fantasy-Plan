@@ -57,7 +57,7 @@ import pandas as pd
 
 from .data import load_player_pool, validate_showdown_pool
 from .simulate import DEFAULT_SPREAD_SCALE, simulate_player_scores
-from .optimize import StackRules
+from .optimize import ShowdownRules, StackRules
 from .outcomes import player_outcomes
 from . import contest as cs
 from . import dk
@@ -157,6 +157,39 @@ def _add_stack_args(p: argparse.ArgumentParser) -> None:
                         "with and without the runback, and the contest sim picks (contest/dk-run)")
     p.add_argument("--max-game-stack-share", type=float, default=None,
                    help="max share of a contest's lineups with 4+ players from one game (contest/dk-run)")
+
+
+CHEAP_SALARY = {"classic": 4000, "showdown": 3000}
+
+
+def _add_portfolio_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--cheap-salary", type=float, default=None,
+                   help="players salaried under this are 'punts' capped at --cheap-cap of the lineups "
+                        "(default $%d Classic / $%d Showdown; 0 disables)"
+                        % (CHEAP_SALARY["classic"], CHEAP_SALARY["showdown"]))
+    p.add_argument("--cheap-cap", type=float, default=0.4,
+                   help="max share of lineups any one punt may appear in (default %(default)s)")
+    p.add_argument("--max-rb-pair-share", type=float, default=None,
+                   help="max share of lineups with two RBs from one team (default 0.2 with "
+                        "--showdown-rules soft, otherwise no cap)")
+
+
+def _portfolio_kwargs(args: argparse.Namespace) -> dict:
+    cheap = args.cheap_salary if args.cheap_salary is not None else CHEAP_SALARY.get(args.fmt)
+    pair = args.max_rb_pair_share
+    if pair is None and args.fmt == "showdown" and getattr(args, "showdown_rules", None) == "soft":
+        pair = 0.2
+    return {"max_game_stack_share": getattr(args, "max_game_stack_share", None),
+            "cheap_salary": cheap or None, "cheap_cap": args.cheap_cap, "max_rb_pair_share": pair}
+
+
+def _showdown_rules(args: argparse.Namespace):
+    mode = getattr(args, "showdown_rules", "off")
+    if mode == "strict":
+        return ShowdownRules()
+    if mode == "soft":
+        return cs.soft_showdown_rules()
+    return None
 
 
 def cmd_build(args: argparse.Namespace) -> None:
@@ -265,7 +298,7 @@ def cmd_contest(args: argparse.Namespace) -> None:
     df = load_player_pool(args.pool)
     if args.fmt == "showdown":
         validate_showdown_pool(df)
-    rules = _stack_rules(args)
+    rules = _stack_rules(args) if args.fmt == "classic" else _showdown_rules(args)
     seed = args.seed
 
     if args.payouts:
@@ -305,11 +338,7 @@ def cmd_contest(args: argparse.Namespace) -> None:
     cand_w = cs.lineups_to_weights(candidates, len(df))
     result = cs.simulate_contest(cand_w, field, eval_scores, payout)
 
-    chosen = cs.select_portfolio(
-        df, candidates, result, args.n_lineups, objective=args.objective,
-        min_unique=args.min_unique, dst_cap=args.dst_cap, max_exposure=args.max_exposure,
-        max_game_stack_share=args.max_game_stack_share,
-    )
+    chosen = _pick_for_contest(df, candidates, result, args.n_lineups, args)
     print(f"Selected {len(chosen)}/{args.n_lineups} lineups (objective={args.objective}).")
 
     # Re-grade the chosen lineups on fresh sims: selecting the best of
@@ -424,17 +453,16 @@ def _contest_payout(row) -> "cs.PayoutCurve":
 
 
 def _pick_for_contest(df, candidates, result, n, args, exclude=frozenset()) -> list[int]:
-    share = getattr(args, "max_game_stack_share", None)
+    kw = _portfolio_kwargs(args)
     chosen = cs.select_portfolio(
         df, candidates, result, n, objective=args.objective, min_unique=args.min_unique,
-        dst_cap=args.dst_cap, max_exposure=args.max_exposure, exclude=set(exclude),
-        max_game_stack_share=share,
+        dst_cap=args.dst_cap, max_exposure=args.max_exposure, exclude=set(exclude), **kw,
     )
     if len(chosen) < n:  # caps/uniqueness too tight for this pool: relax, don't leave entries blank
         more = cs.select_portfolio(
             df, candidates, result, n - len(chosen), objective=args.objective, min_unique=1,
             dst_cap=1.0, max_exposure=1.0, tiered_caps=False, exclude=set(chosen) | set(exclude),
-            max_game_stack_share=share,
+            **kw,  # keep the punt / RB-pair / game-stack share caps
         )
         print(f"  note: only {len(chosen)} lineups fit the exposure/uniqueness rules; "
               f"filled {len(more)} more with relaxed rules")
@@ -662,6 +690,24 @@ def _add_sgo_fetch_args(p: argparse.ArgumentParser) -> None:
                    help="restrict to bookmakerID(s), e.g. draftkings,fanduel")
 
 
+def cmd_corr_measure(args: argparse.Namespace) -> None:
+    from . import correlations as corr
+    prof = corr.measure(args.weekly)
+    df = corr.synthetic_slate(prof["role_means"])
+    sim = corr.simulated_correlations(df, simulate_player_scores(df, n_trials=args.trials, seed=0))
+    print(f"{prof['team_games']} team-games, seasons {prof['seasons']}")
+    print(f"{'pair':18s} {'real':>7s} {'sim':>7s}")
+    for k in ("same_team", "opponent"):
+        for pair, v in prof[k].items():
+            print(f"{pair:18s} {v['corr']:+7.3f} {sim[k][pair]['corr']:+7.3f}")
+    print(f"RMS gap {corr.correlation_error(prof, sim):.3f}")
+    b = prof["rb_blowouts"]
+    print(f"Both RBs 15+ DK pts: {b['p_both_rbs_15plus_5plus_tds']:.1%} when the offense scores 5+ TDs "
+          f"vs {b['p_both_rbs_15plus_normal']:.1%} otherwise")
+    corr.save(prof, args.out)
+    print(f"Wrote {args.out}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="dfs_engine")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -740,6 +786,11 @@ def main() -> None:
     _add_sim_args(p_con)
     _add_stack_args(p_con)
     _add_field_optimizer_args(p_con)
+    _add_portfolio_args(p_con)
+    p_con.add_argument("--showdown-rules", choices=["soft", "strict", "off"], default="soft",
+                       help="Showdown correlation rules for candidates: strict (no same-team RB pair, "
+                            "QB needs a catcher, catcher CPT needs his QB, max 1 DST), soft = strict "
+                            "plus RB-pair builds limited by --max-rb-pair-share (default), off = none")
     p_con.set_defaults(func=cmd_contest)
 
     p_dkp = sub.add_parser("dk-pool", help="Player pool (with DK IDs) from a DraftKings entry file")
@@ -792,6 +843,7 @@ def main() -> None:
     _add_sim_args(p_dkr)
     _add_stack_args(p_dkr)
     _add_field_optimizer_args(p_dkr)
+    _add_portfolio_args(p_dkr)
     p_dkr.set_defaults(func=cmd_dk_run)
 
     p_fs = sub.add_parser("field-study", help="Profile past contest-standings exports (field behavior)")
@@ -811,6 +863,14 @@ def main() -> None:
                       help="a week's projections file (with salary) and its contest-standings CSV/ZIP; repeat")
     p_of.add_argument("--profile", default=str(ownership.PROFILE_PATH))
     p_of.set_defaults(func=cmd_own_fit)
+
+    p_cm = sub.add_parser("corr-measure", help="Measure real player-pair correlations from nflverse "
+                                               "weekly stats and compare the simulation to them")
+    p_cm.add_argument("--weekly", nargs="+", required=True,
+                      help="nflverse stats_player_week_<season>.csv files")
+    p_cm.add_argument("--trials", type=int, default=5000)
+    p_cm.add_argument("--out", default="data/correlation_profile.json")
+    p_cm.set_defaults(func=cmd_corr_measure)
 
     p_fetch = sub.add_parser("sgo-fetch", help="Download SportsGameOdds events (lines + props) to JSON")
     _add_sgo_fetch_args(p_fetch)

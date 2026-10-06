@@ -16,9 +16,10 @@ noise:
    the expense of his teammates (negative within-group correlation),
    which stops the model from over-stacking a team's whole receiving
    corps as if they were independent.
-4. Game script is asymmetric: a leading team runs more (RB volume up,
-   pass-catcher volume down); a trailing team passes more (QB/WR/TE
-   volume up, RB volume down).
+4. Game script is asymmetric: a team that out-scores its opponent (by
+   more than the spread implied) runs more (RB volume up, pass-catcher
+   volume down); a trailing team passes more (QB/WR/TE up, RB down).
+   Both teams' passers also share a per-game "shootout" shock.
 5. Residual player-level noise is right-skewed / fat-tailed (blend of
    Gaussian + shifted-exponential) to reflect real NFL boom risk
    (long TDs, garbage-time scores) better than a pure Gaussian.
@@ -60,7 +61,8 @@ def qb_variance_multiplier(salary: pd.Series) -> pd.Series:
     Tier QBs into salary terciles and scale variance up for cheaper/
     less-proven starters (proxy for backup / game-manager bust risk).
     """
-    qb_mask = salary.notna()
+    if salary.nunique() < 3:  # can't tier (e.g. every QB at one salary)
+        return pd.Series(1.0, index=salary.index)
     terciles = pd.qcut(salary, 3, labels=["low", "mid", "high"], duplicates="drop")
     mult = terciles.map({"low": 1.35, "mid": 1.12, "high": 1.00}).astype(float)
     return mult.fillna(1.00)
@@ -68,11 +70,11 @@ def qb_variance_multiplier(salary: pd.Series) -> pd.Series:
 
 # Default ceiling (85th percentile) as a multiple of projection, for players
 # whose `ceiling` is missing: proj * (1 + spread_scale * (mult - 1)). The
-# scale 0.85 makes a simulated, ownership-sampled field's score spread
+# scale 0.80 makes a simulated, ownership-sampled field's score spread
 # (top 0.1% / 1% / 20% vs median) match three real 2026 Millionaire Makers
 # (data/field_profile.json); `contest` / `dk-run` re-fit it per slate.
 BASE_CEILING_MULT = {"QB": 1.55, "RB": 1.85, "WR": 1.90, "TE": 1.90, "DST": 2.00}
-DEFAULT_SPREAD_SCALE = 0.85
+DEFAULT_SPREAD_SCALE = 0.80
 
 
 def fill_default_ceilings(ceiling: np.ndarray, proj: np.ndarray, position: pd.Series,
@@ -88,11 +90,14 @@ def simulate_player_scores(
     df: pd.DataFrame,
     n_trials: int = 50_000,
     seed: int | None = None,
-    game_total_sd_frac: float = 0.14,
-    team_split_sd: float = 2.5,
-    target_competition_weight: float = 0.45,
-    game_script_weight: float = 0.18,
-    residual_sd_frac: float = 0.32,
+    game_total_sd_frac: float = 0.10,
+    team_split_sd: float = 2.0,
+    target_competition_weight: float = 0.60,
+    game_script_weight: float = 0.40,
+    residual_sd_frac: float = 0.90,
+    rb_competition_weight: float = 0.30,
+    qb_catcher_link: float = 0.85,
+    shootout_sd: float = 0.20,
     calibrate_ceiling: bool = True,
     ceiling_pct: float = 0.85,
     spread_scale: float | None = DEFAULT_SPREAD_SCALE,
@@ -100,6 +105,11 @@ def simulate_player_scores(
     """
     Simulate fantasy points for every player in `df` across `n_trials`
     correlated Monte Carlo trials.
+
+    The correlation knobs (game_total_sd_frac .. shootout_sd) default to a
+    fit (`correlations.fit_simulation`) against role-pair correlations of
+    real DK scores, 2021-25 regular seasons (data/correlation_profile.json):
+    QB1~WR1 +0.38, WR1~WR2 +0.09, RB1~RB2 -0.07, QB1~opp QB1 +0.19.
 
     Returns
     -------
@@ -143,8 +153,17 @@ def simulate_player_scores(
     team_points_draw = team_game_total_draw * team_share + team_split_noise
     offense_factor = team_points_draw / team_total_base  # ~1.0 centered multiplier
 
-    # --- 3. Leading/trailing game-script signal (team over/under-performing) ---
-    script_signal = offense_factor - 1.0  # >0 means team is beating expectation (leading-ish proxy)
+    # --- 3. Leading/trailing game-script signal: the team's simulated margin
+    # over its opponent vs the expected margin, per point of team total
+    # (falls back to over/under-performance when the opponent isn't in the pool) ---
+    team_names = sorted(team_index, key=lambda k: team_index[k])
+    opp_of = df.groupby("team")["opp"].first().reindex(team_names)
+    opp_idx = np.array([team_index.get(o, -1) for o in opp_of])
+    has_opp = opp_idx >= 0
+    opp_points = team_points_draw[:, np.clip(opp_idx, 0, None)]
+    opp_base = team_total_base[np.clip(opp_idx, 0, None)]
+    margin_signal = ((team_points_draw - opp_points) - (team_total_base - opp_base)) / team_total_base
+    script_signal = np.where(has_opp[None, :], margin_signal, offense_factor - 1.0)
 
     player_team_idx = df["team"].map(team_index).to_numpy()
     player_offense_factor = offense_factor[:, player_team_idx]
@@ -172,6 +191,32 @@ def simulate_player_scores(
                 - target_competition_weight * grp_mean
             )
 
+    # --- 5b. Same-team RBs split carries the same way ---
+    rb_pos = (df["position"] == "RB").to_numpy()
+    if rb_competition_weight:
+        for team in df["team"].unique():
+            grp_mask = rb_pos & (df["team"] == team).to_numpy()
+            if grp_mask.sum() > 1:
+                grp_mean = idiosyncratic[:, grp_mask].mean(axis=1, keepdims=True)
+                idiosyncratic[:, grp_mask] -= rb_competition_weight * grp_mean
+
+    # --- 5c. A QB's passing line is his receivers' production: tie his
+    # player-level noise to the (sqrt-)projection-weighted noise of his team's
+    # pass catchers (`qb_catcher_link` = share of his noise variance) ---
+    if qb_catcher_link:
+        proj_arr = df["proj"].to_numpy(dtype=float)
+        for team in df["team"].unique():
+            on_team = (df["team"] == team).to_numpy()
+            qbs = np.flatnonzero(on_team & (df["position"] == "QB").to_numpy())
+            catchers = on_team & pass_catcher_mask
+            if not len(qbs) or not catchers.any():
+                continue
+            w = np.sqrt(proj_arr[catchers].clip(min=0.1))
+            link = idiosyncratic[:, catchers] @ w
+            link = (link - link.mean()) / (link.std() or 1.0)
+            idiosyncratic[:, qbs] = (np.sqrt(1 - qb_catcher_link) * idiosyncratic[:, qbs]
+                                     + np.sqrt(qb_catcher_link) * link[:, None])
+
     # --- 6. Residual skewed noise ---
     residual = np.column_stack([
         skewed_noise(n_trials, rng) for _ in range(n_players)
@@ -191,6 +236,13 @@ def simulate_player_scores(
     game_script_adj = np.zeros((n_trials, n_players))
     game_script_adj[:, rb_mask] = -game_script_weight * player_script_signal[:, rb_mask]
     game_script_adj[:, pass_mask] = game_script_weight * player_script_signal[:, pass_mask]
+
+    # Shootouts: a game-level passing-volume shock shared by both teams'
+    # QBs and pass catchers (real QB1~opp QB1 corr ~0.19 while same-team
+    # RB1~WR1 is ~0, so it can't all come through the team factor).
+    if shootout_sd:
+        shootout = rng.normal(0.0, shootout_sd, size=(n_trials, n_games))
+        game_script_adj[:, pass_mask] += shootout[:, game_id_arr[pass_mask]]
 
     mean_component = proj[None, :] * (player_offense_factor + game_script_adj)
     mean_component[:, dst_mask] = proj[None, dst_mask] * (2.0 - opp_offense_factor[:, dst_mask])

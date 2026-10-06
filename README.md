@@ -22,12 +22,15 @@ shared, correlated factors — the same basic approach real sim-based tools
    Vegas-implied total.
 2. **Team-level offense factor** splits that game total between the two
    teams and correlates every one of a team's players together.
-3. **Target-share competition**: same-team WR/TE are *negatively*
-   correlated with each other (one's big game partly comes at a
-   teammate's expense), so the model doesn't let you "stack" a whole
-   receiving corps as if they were independent.
-4. **Asymmetric game script**: a leading team's RBs get a volume boost;
-   a trailing team's QB/WR/TE get a volume boost.
+3. **Target-share and carry competition**: same-team WR/TE are partly
+   *negatively* tied to each other (one's big game partly comes at a
+   teammate's expense), and so are same-team RBs. The QB's own noise is
+   tied to his pass catchers' (his passing line *is* their production),
+   so QB~WR is strongly correlated while WR~WR is only weakly correlated.
+4. **Asymmetric game script**: a team that out-scores its opponent by
+   more than the spread implied runs more (RB volume up, passers down);
+   the trailing team passes more. Both teams' passers also share a
+   per-game **shootout** shock, which makes QB~opposing QB positive.
 5. **Right-skewed residual noise** (Gaussian + shifted-exponential blend)
    models real boom risk (long TDs, garbage-time volume) better than a
    symmetric normal distribution.
@@ -39,7 +42,26 @@ shared, correlated factors — the same basic approach real sim-based tools
    fitting). It's a per-player affine rescale, so the correlations from
    steps 1–5 are preserved. Change the percentile with `--ceiling-pct`,
    or turn it off with `--no-ceiling-calibration`.
-8. **Default ceilings fitted to real contests**: players without a
+8. **Correlations measured from real games**: the knobs behind steps 1–4
+   are fitted (`correlations.fit_simulation`) so the simulation's
+   role-pair correlations match real DK scores from 2021–25 (nflverse
+   weekly stats, `data/correlation_profile.json`):
+
+   | pair | real | sim |
+   |---|---|---|
+   | QB1 ~ WR1 / WR2 / TE1 | +0.38 / +0.37 / +0.32 | +0.41 / +0.29 / +0.25 |
+   | QB1 ~ RB1 | +0.09 | +0.05 |
+   | RB1 ~ RB2 | −0.07 | −0.13 |
+   | WR1 ~ WR2 | +0.09 | +0.07 |
+   | QB1 ~ opp QB1 | +0.19 | +0.10 |
+   | WR1 ~ opp WR1 | +0.11 | +0.12 |
+
+   Before this fit, every pair in the sim was correlated at +0.3 to +0.5,
+   because the team factor swamped everything else. That over-rewarded
+   stacking whole teams. Refresh it each season with:
+   `python -m dfs_engine.cli corr-measure --weekly stats_player_week_2021.csv ... --out data/correlation_profile.json`
+   ([nflverse weekly files](https://github.com/nflverse/nflverse-data/releases/tag/stats_player)).
+9. **Default ceilings fitted to real contests**: players without a
    ceiling get a position default. Its width (`--spread-scale`) is chosen
    so a simulated field's score spread matches three real 2026
    Millionaire Makers: top 0.1% / top 1% / top 20% at 1.66× / 1.51× /
@@ -185,9 +207,31 @@ What it does:
    - `--objective top1` makes each pick maximize the share of simulations
      where *some* entry finishes top 1%. That favors lineups that win in
      different outcomes, so it's better for diversified mass-multi-entry.
+   - **Punt cap.** Any player salaried under `--cheap-salary` (default
+     $4,000 Classic, $3,000 Showdown; `0` turns it off) appears in at most
+     `--cheap-cap` (default 40%) of the lineups. One punt who scores zero
+     can't sink the whole portfolio.
+   - If the caps leave entries empty, a relaxed pass fills them. It keeps
+     the punt, RB-pair and game-stack share caps.
 5. **Holdout.** The chosen portfolio is re-graded on fresh simulations
    (`--holdout-trials`), so the reported ROI isn't inflated by having
    picked the luckiest of thousands.
+
+**Showdown correlation rules** (`--fmt showdown`, `--showdown-rules`):
+
+- `strict` forbids:
+  - two RBs from one team;
+  - a QB with none of his pass catchers;
+  - a WR/TE captain without his QB;
+  - two DSTs.
+- `soft` (default) builds candidates with the strict rules *and* a variant
+  that allows a same-team RB pair. RB pairs are then limited to
+  `--max-rb-pair-share` (default 20%) of the lineups. Real games support
+  this: RB1 and RB2 scores are correlated at −0.07 overall. But in the 7%
+  of games where an offense scores 5+ TDs, both RBs reach 15 DK points
+  18% of the time, versus 4% otherwise. That was the MNF-winning Bijan +
+  Brian Robinson Jr. build.
+- `off` applies no correlation rules.
 
 Payouts: by default a stylized top-heavy curve (`--rake`, `--paid-frac`,
 `--first-frac`, `--min-cash-mult`). For a real contest, pass its payout
@@ -434,6 +478,7 @@ dfs_engine/
   portfolio.py    # N-lineup portfolio builder (exposure caps, uniqueness)
   diagnostics.py  # Optimal% leverage diagnostic
   sportsgameodds.py # SportsGameOdds fetch, game lines, prop -> DK baseline
+  correlations.py # real player-pair correlations (nflverse) + fitting the sim to them
   cli.py          # command-line entry points
 tests/
   test_engine.py  # pytest-style tests
@@ -442,11 +487,13 @@ tests/
   test_contest.py    # payouts, field sampler, contest sim, portfolio selection
   test_dk.py         # entry-file parsing, matching, DK roster rules, upload, dk-run end to end
   test_history.py    # standings parsing, field profile, ownership estimator, spread fitting
+  test_correlations.py # DK scoring from nflverse, measured vs simulated correlations
   run_tests.py    # standalone runner (no pytest dependency)
 data/
   sample_classic_pool.csv
   sample_sgo_events.json  # SGO /events snapshot matching the sample pool
   field_profile.json      # aggregate field behavior from three 2026 Millys
+  correlation_profile.json # role-pair DK score correlations, 2021-25 regular seasons
 ```
 
 ## Testing

@@ -1,0 +1,89 @@
+{
+ "seasons": [
+  2021,
+  2022,
+  2023,
+  2024,
+  2025
+ ],
+ "team_games": 2717,
+ "same_team": {
+  "QB1~WR1": {
+   "corr": 0.375,
+   "n": 1929
+  },
+  "QB1~WR2": {
+   "corr": 0.365,
+   "n": 1798
+  },
+  "QB1~TE1": {
+   "corr": 0.321,
+   "n": 1875
+  },
+  "QB1~RB1": {
+   "corr": 0.085,
+   "n": 1900
+  },
+  "RB1~RB2": {
+   "corr": -0.071,
+   "n": 1778
+  },
+  "WR1~WR2": {
+   "corr": 0.085,
+   "n": 1901
+  },
+  "WR1~TE1": {
+   "corr": -0.008,
+   "n": 1984
+  },
+  "RB1~WR1": {
+   "corr": 0.002,
+   "n": 2027
+  },
+  "WR2~WR3": {
+   "corr": 0.078,
+   "n": 1626
+  }
+ },
+ "opponent": {
+  "QB1~opp QB1": {
+   "corr": 0.188,
+   "n": 1768
+  },
+  "QB1~opp WR1": {
+   "corr": 0.137,
+   "n": 1899
+  },
+  "WR1~opp WR1": {
+   "corr": 0.109,
+   "n": 2040
+  },
+  "RB1~opp RB1": {
+   "corr": -0.07,
+   "n": 2022
+  },
+  "RB1~opp QB1": {
+   "corr": 0.042,
+   "n": 1885
+  }
+ },
+ "role_means": {
+  "QB1": 18.21,
+  "RB1": 15.21,
+  "RB2": 7.84,
+  "WR1": 15.49,
+  "WR2": 10.82,
+  "WR3": 7.19,
+  "TE1": 9.56
+ },
+ "rb_blowouts": {
+  "share_games_5plus_tds": 0.071,
+  "rb2_mean_normal": 6.7,
+  "rb2_mean_5plus_tds": 10.61,
+  "rb1_mean_normal": 14.2,
+  "rb1_mean_5plus_tds": 22.94,
+  "rb1_rb2_corr_5plus_tds": -0.105,
+  "p_both_rbs_15plus_5plus_tds": 0.181,
+  "p_both_rbs_15plus_normal": 0.038
+ }
+}

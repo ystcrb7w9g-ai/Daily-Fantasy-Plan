@@ -230,3 +230,51 @@ def test_flex_candidates_mix_structures_and_share_cap_limits_game_stacks():
     chosen = cs.select_portfolio(df, cands, res, 10, min_unique=1, max_game_stack_share=0.3)
     assert len(chosen) > 0
     assert sum(cs.max_game_stack(df, cands[i]) >= 4 for i in chosen) <= 3
+
+
+# --- cheap-player cap / soft same-team RB rule ------------------------------
+
+def test_cheap_cap_limits_punt_exposure():
+    df, cands, res = _graded(n_cand=60)
+    cheap_line = 4000
+    chosen = cs.select_portfolio(df, cands, res, 10, min_unique=1, tiered_caps=False, dst_cap=1.0,
+                                 cheap_salary=cheap_line, cheap_cap=0.3)
+    assert len(chosen) > 0
+    counts = np.zeros(len(df))
+    for i in chosen:
+        counts[cands[i].player_ids] += 1
+    cheap = df["salary"].to_numpy() < cheap_line
+    assert counts[cheap].max() <= 3
+
+
+def _showdown_pool():
+    import pandas as pd
+    rows = []
+    for team, opp in (("ATL", "NO"), ("NO", "ATL")):
+        for pos, sal, proj in (("QB", 10000, 20), ("RB", 9000, 18), ("RB", 4000, 9), ("WR", 8000, 15),
+                               ("WR", 5000, 9), ("TE", 4000, 7), ("DST", 3500, 6)):
+            rows.append({"name": f"{team} {pos}{sal}", "team": team, "opp": opp, "position": pos,
+                         "salary": sal, "proj": float(proj), "own": 6 / 14, "team_total": 22.5,
+                         "game_total": 45.0, "spread": 0.0})
+    df = pd.DataFrame(rows)
+    df["player_id"] = df.index
+    return df
+
+
+def test_soft_showdown_rules_add_rb_pairs_and_share_cap_limits_them():
+    df = _showdown_pool()
+    strict, soft = cs.soft_showdown_rules()
+    assert strict.no_same_team_rbs and not soft.no_same_team_rbs
+    scores = simulate_player_scores(df, n_trials=600, seed=41)
+    only_strict = cs.generate_candidates(df, scores, 30, fmt="showdown", stack_rules=strict, seed=41)
+    assert not any(cs.has_same_team_rbs(df, c) for c in only_strict)
+    both = cs.generate_candidates(df, scores, 60, fmt="showdown", stack_rules=[strict, soft],
+                                  seed=41, max_solves=400)
+    pairs = [cs.has_same_team_rbs(df, c) for c in both]
+    assert any(pairs) and not all(pairs)
+    field = cs.generate_field(df, 1500, fmt="showdown", seed=42, min_salary=40_000)
+    res = cs.simulate_contest(cs.lineups_to_weights(both, len(df)), field,
+                              simulate_player_scores(df, n_trials=600, seed=43), cs.gpp_payout_curve(5_000, 10.0))
+    chosen = cs.select_portfolio(df, both, res, 10, min_unique=1, tiered_caps=False, dst_cap=1.0,
+                                 max_rb_pair_share=0.2)
+    assert len(chosen) > 0 and sum(pairs[i] for i in chosen) <= 2

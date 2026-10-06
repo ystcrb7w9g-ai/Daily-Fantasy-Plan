@@ -33,12 +33,12 @@ from __future__ import annotations
 
 import warnings
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 import pandas as pd
 
-from .optimize import SALARY_CAP, LineupResult, StackRules, solve_classic, solve_showdown
+from .optimize import SALARY_CAP, LineupResult, ShowdownRules, StackRules, solve_classic, solve_showdown
 from .portfolio import default_exposure_cap
 
 CLASSIC_SLOTS = {"QB": 1, "RB": 2, "WR": 3, "TE": 1, "DST": 1}  # + 1 FLEX (RB/WR/TE)
@@ -174,12 +174,32 @@ def max_game_stack(df: pd.DataFrame, lineup: LineupResult) -> int:
     return int(counts.max())
 
 
+def has_same_team_rbs(df: pd.DataFrame, lineup: LineupResult) -> bool:
+    """True if the lineup rosters two or more RBs from one team."""
+    d = df.iloc[lineup.player_ids]
+    return bool(d.loc[d["position"] == "RB", "team"].duplicated().any())
+
+
+def soft_showdown_rules(rules: ShowdownRules | None = None) -> list[ShowdownRules]:
+    """
+    Strict Showdown rules plus a copy allowing same-team RB pairs. Real
+    games (data/correlation_profile.json, 2021-25) put RB1/RB2 scores at
+    corr -0.07, but in the ~7% of games where an offense scores 5+ TDs
+    both RBs reach 15 DK points 18% of the time (vs 4% otherwise) -- the
+    Bijan + Brian Robinson Jr. win. Rotating the two keeps those builds in
+    the candidate pool; `select_portfolio(max_rb_pair_share=...)` then
+    limits how many get played.
+    """
+    strict = rules or ShowdownRules()
+    return [strict, replace(strict, no_same_team_rbs=False)]
+
+
 def generate_candidates(
     df: pd.DataFrame,
     scores: np.ndarray,
     n_candidates: int,
     fmt: str = "classic",
-    stack_rules: StackRules | list[StackRules] | None = None,
+    stack_rules: StackRules | ShowdownRules | list | None = None,
     mix_range: tuple[float, float] = (0.3, 1.0),
     seed: int | None = None,
     max_solves: int | None = None,
@@ -192,6 +212,7 @@ def generate_candidates(
     `stack_rules` may be a list of rule sets (see `flexible_stack_rules`):
     each solve then uses one of them in turn, so the pool spans stack
     structures and the contest sim decides which ones are worth playing.
+    For Showdown pass `ShowdownRules` (or a list, e.g. `soft_showdown_rules()`).
     """
     rule_sets = stack_rules if isinstance(stack_rules, list) else [stack_rules]
     rng = np.random.default_rng(seed)
@@ -207,7 +228,7 @@ def generate_candidates(
         if fmt == "classic":
             lu = solve_classic(df, pts, stack_rules=rule_sets[solve_i % len(rule_sets)])
         else:
-            lu = solve_showdown(df, pts)
+            lu = solve_showdown(df, pts, rules=rule_sets[solve_i % len(rule_sets)])
         if lu is None:
             continue
         key = lineup_key(lu.player_ids, lu.captain_id)
@@ -707,6 +728,9 @@ def select_portfolio(
     exclude: set[int] | None = None,
     max_game_stack_share: float | None = None,
     game_stack_size: int = 4,
+    cheap_salary: float | None = None,
+    cheap_cap: float = 0.4,
+    max_rb_pair_share: float | None = None,
 ) -> list[int]:
     """
     Greedy portfolio pick; returns candidate indices in selection order.
@@ -722,6 +746,9 @@ def select_portfolio(
     (keeping `dst_cap` / `max_exposure`); `exclude` skips candidate indices.
     `max_game_stack_share` caps the share of picks with `game_stack_size`+
     players from one game (big game stacks only where they earn a spot).
+    Players salaried under `cheap_salary` are capped at `cheap_cap` of the
+    picks, so one punt that scores zero can't sink every lineup;
+    `max_rb_pair_share` caps the share of picks with two RBs from one team.
     """
     if objective not in ("roi", "top1"):
         raise ValueError("objective must be 'roi' or 'top1'")
@@ -729,6 +756,9 @@ def select_portfolio(
     is_dst = (df["position"] == "DST").to_numpy()
     tiered = df["own"].apply(default_exposure_cap).to_numpy() if tiered_caps else np.ones(n_players)
     caps = np.minimum(np.where(is_dst, dst_cap, tiered), max_exposure)
+    if cheap_salary is not None:
+        cheap = df["salary"].to_numpy(dtype=float) < cheap_salary
+        caps = np.where(cheap, np.minimum(caps, cheap_cap), caps)
     max_count = np.maximum(1, np.floor(caps * n_lineups)).astype(int)
 
     ev = result.payouts.mean(axis=0).astype(np.float64)
@@ -736,6 +766,10 @@ def select_portfolio(
         if max_game_stack_share is not None else np.zeros(len(candidates), dtype=bool)
     max_big = int(np.floor(max_game_stack_share * n_lineups)) if max_game_stack_share is not None else 0
     n_big = 0
+    is_pair = np.array([has_same_team_rbs(df, c) for c in candidates]) \
+        if max_rb_pair_share is not None else np.zeros(len(candidates), dtype=bool)
+    max_pair = int(np.floor(max_rb_pair_share * n_lineups)) if max_rb_pair_share is not None else 0
+    n_pair = 0
     sets = [set(c.player_ids) for c in candidates]
     counts = np.zeros(n_players, dtype=int)
     chosen: list[int] = []
@@ -757,7 +791,7 @@ def select_portfolio(
             if not available[idx]:
                 break
             ids = candidates[idx].player_ids
-            if is_big[idx] and n_big >= max_big:
+            if (is_big[idx] and n_big >= max_big) or (is_pair[idx] and n_pair >= max_pair):
                 available[idx] = False
                 continue
             ok = (counts[ids] < max_count[ids]).all() and all(
@@ -771,6 +805,7 @@ def select_portfolio(
             break
         chosen.append(int(picked))
         n_big += int(is_big[picked])
+        n_pair += int(is_pair[picked])
         available[picked] = False
         counts[candidates[picked].player_ids] += 1
         if objective == "top1":
