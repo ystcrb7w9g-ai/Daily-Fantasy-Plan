@@ -115,7 +115,8 @@ def test_check_ownership_flags_flat_and_bad_totals():
     df["own"] = 9.0 / len(df)  # perfectly flat
     notes = ownership.check_ownership(df)
     assert any("too flat" in n for n in notes)
-    df["own"] = ownership.estimate_ownership(df)
+    curves = {k: v for k, v in ownership._profile(None).items() if not k.startswith("own_model")}
+    df["own"] = ownership.estimate_ownership(df, curves)  # real-Milly curves pass by construction
     assert ownership.check_ownership(df) == []
     df["own"] = df["own"] * 0.5
     assert any("sums to" in n for n in ownership.check_ownership(df))
@@ -177,6 +178,7 @@ def test_fit_ownership_model_recovers_value_driven_ownership():
     assert set(model) == {"QB", "RB", "WR", "TE", "DST"}
     test = _value_owned_pool(seed=9)
     prof = history.load_profile(os.path.join(ROOT, "data", "field_profile.json"))
+    prof.pop("own_model_v2", None)
     est = ownership.estimate_ownership(test, dict(prof, own_model=model))
     value = test["proj"] / test["salary"]
     for p in ("RB", "WR"):
@@ -188,6 +190,7 @@ def test_fit_ownership_model_recovers_value_driven_ownership():
 def test_estimate_ownership_falls_back_to_curves_without_model():
     prof = history.load_profile(os.path.join(ROOT, "data", "field_profile.json"))
     prof.pop("own_model", None)
+    prof.pop("own_model_v2", None)
     df = _value_owned_pool()
     est = ownership.estimate_ownership(df, prof)
     assert abs(est[df["position"] == "QB"].sum() - 1.0) < 0.02

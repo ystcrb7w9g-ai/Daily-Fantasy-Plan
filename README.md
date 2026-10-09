@@ -339,8 +339,9 @@ entries or usernames). From three 2026 Millionaire Makers (Weeks 1–3,
 **Ownership checks and fallback.** `dk-pool` and `dk-run` compare your
 ownership column to these real fields, rescaled to the slate's size. They
 flag totals far from 900% and positions that look too flat or too chalky.
-`dk-pool --estimate-own` fills missing ownership from a fallback model:
-a per-position model fitted to real %Drafted (see `own-fit` below).
+`dk-pool --estimate-own` fills missing ownership from our own ownership
+model (see "Our ownership model" below) and writes it to an `own_model`
+column next to the provided `own`, listing where the two disagree most.
 `--own-blend 0.3` mixes 30% of that estimate into provided ownership, and
 `--own-sharpen 1.2` makes the provided chalk chalkier. Over three scored
 weeks, neither improved a published projection, so both are off by
@@ -371,19 +372,67 @@ Results for 2026 Weeks 1–3 (140–151 players per week, GoingFor2-based files)
   A fitted correction on top of GoingFor2 also made it slightly worse.
 - **Projection biases flip sign week to week,** so there's nothing
   consistent to correct.
-- **Fallback ownership model.** `own-fit` fits it per position to real
-  %Drafted from points per $1k, projection and salary; the shipped fit
-  uses Weeks 1–3. Predicting a held-out week, it reaches correlation
-  ~0.65 / avg error 3.4 pts, versus 0.54 / 4.2 for the curve-only
-  estimator and 0.87 / 2.3 for GoingFor2. Use it only when there's no
-  published ownership. Refit as weeks accumulate:
+
+### Our ownership model (`own-fit`, `dk-pool --estimate-own --week N`)
+
+`dfs_engine/ownership_model.py` projects ownership from information that
+every DFS player can see before lock. Per position it fits a softmax
+model of how real %Drafted is split. The inputs are:
+
+- points per $1k, projection and salary (all z-scored within the position);
+- the rank of each player's value at his position;
+- the Vegas team total and expected margin;
+- last week's DK points;
+- season-to-date DK points per game per $1k (the FPPG the DK lobby shows);
+- the DK points per game of teammates in his position group who are ruled
+  Out or Doubtful (the volume a backup inherits).
+
+Lines, box scores and injury reports come from free
+[nflverse](https://github.com/nflverse) files. They download to
+`data/nflverse/` on first use, which is git-ignored; add
+`--refresh-nflverse` once final injury designations are out. Players
+beyond the realistic pool (≈2 QB, 2 RB, 4.2 WR, 1.6 TE and 2 DST per
+game, by projection) share a 4% tail.
+
+Leave-one-week-out on the 2026 Week 1–3 Millionaire Makers:
+
+| | Week 1 | Week 2 | Week 3 | avg |
+|---|---|---|---|---|
+| **Ours** — correlation / avg error | 0.76 / 3.0 pts | 0.75 / 3.0 | 0.63 / 3.6 | 0.71 / 3.2 |
+| Old log-linear fallback | | | | 0.65 / 3.5 |
+| GoingFor2 (published) | 0.90 / 2.0 | 0.85 / 2.5 | 0.85 / 2.4 | 0.87 / 2.3 |
+
+GoingFor2 is still clearly better: it reacts to news, which a model
+built only on box scores can't. Mixing ours into it made it slightly worse, so
+keep GoingFor2's numbers as `own` and use ours:
+
+- as the fallback when no ownership projection is available;
+- as a leverage scan: the `own_model` column, plus the "we expect
+  MORE / LESS" list `dk-pool` prints, shows where the two disagree.
+
+Optimal% from our sim, last week's targets + carries, and lighter
+regularization were also tested. None helped on held-out weeks.
+
+Refit after every week of contest results. Each `--week` takes the
+projections file you used (with salary and that source's ownership, so
+the run also scores it), the Milly contest-standings export, and the NFL
+week number:
 
 ```bash
 python -m dfs_engine.cli own-fit \
-    --week week1_projections.csv contest-standings-<w1>.zip \
-    --week week2_projections.csv contest-standings-<w2>.zip \
-    --week week3_projections.csv contest-standings-<w3>.zip
+    --week week1_projections.csv contest-standings-<w1>.zip 1 \
+    --week week2_projections.csv contest-standings-<w2>.zip 2 \
+    --week week3_projections.csv contest-standings-<w3>.zip 3
 ```
+
+Use it on a slate:
+
+```bash
+python -m dfs_engine.cli dk-pool --entries DKEntries.csv --projections goingfor2.tsv \
+    --estimate-own --week 5 --refresh-nflverse --out week5_pool.csv
+```
+
+`--week` also fills any missing Vegas lines from the nflverse schedule.
 
 ### Pull in SportsGameOdds lines + prop-based baseline projections
 
@@ -479,6 +528,7 @@ dfs_engine/
   diagnostics.py  # Optimal% leverage diagnostic
   sportsgameodds.py # SportsGameOdds fetch, game lines, prop -> DK baseline
   correlations.py # real player-pair correlations (nflverse) + fitting the sim to them
+  ownership_model.py # our ownership projections: nflverse inputs, softmax fit, leave-one-week-out
   cli.py          # command-line entry points
 tests/
   test_engine.py  # pytest-style tests
@@ -488,6 +538,7 @@ tests/
   test_dk.py         # entry-file parsing, matching, DK roster rules, upload, dk-run end to end
   test_history.py    # standings parsing, field profile, ownership estimator, spread fitting
   test_correlations.py # DK scoring from nflverse, measured vs simulated correlations
+  test_ownership_model.py # schedule lines, recency/injury inputs, softmax fit, CV
   run_tests.py    # standalone runner (no pytest dependency)
 data/
   sample_classic_pool.csv

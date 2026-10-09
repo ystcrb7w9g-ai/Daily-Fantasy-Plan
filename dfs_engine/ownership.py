@@ -92,13 +92,17 @@ def fit_ownership_model(weeks: list[pd.DataFrame]) -> dict:
 def estimate_ownership(df: pd.DataFrame, profile: dict | None = None) -> pd.Series:
     """
     Fraction-owned estimate per player (players without a projection get 0).
-    Uses the fitted per-position model in the profile (`own_model`, from
-    `own-fit`) when present, else ranks by `value_score` onto the real-field
-    ownership curves. Either way each position is rescaled to its expected
-    total (base slots + FLEX share).
+    Uses, in order of preference: the softmax model in the profile
+    (`own_model_v2`, from `own-fit`; best with `ownership_model.prepare`
+    inputs attached), the older log-linear `own_model`, or a `value_score`
+    ranking onto the real-field ownership curves. Each position is scaled
+    to its expected total (base slots + FLEX share).
     """
     prof = _profile(profile)
     totals = position_totals(prof)
+    if prof.get("own_model_v2"):  # softmax model (ownership_model.py); inputs it lacks count as average
+        from .ownership_model import predict
+        return predict(df, prof["own_model_v2"]["coef"], totals)
     own = pd.Series(0.0, index=df.index)
     has_proj = df["proj"].notna() & (df["proj"] > 0)
     model = prof.get("own_model")

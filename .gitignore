@@ -5,3 +5,4 @@ __pycache__/
 /outputs/
 *.egg-info/
 .venv/
+/data/nflverse/

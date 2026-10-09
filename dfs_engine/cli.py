@@ -63,6 +63,7 @@ from . import contest as cs
 from . import dk
 from . import history
 from . import ownership
+from . import ownership_model as om
 from .portfolio import build_portfolio, exposure_report
 from .diagnostics import run_optimal_pct_chunk, leverage_report
 from . import sportsgameodds as sgo
@@ -383,27 +384,36 @@ def cmd_dk_pool(args: argparse.Namespace) -> None:
     if projections is not None:
         print(f"Read {len(projections)} projection rows; columns used: {', '.join(projections.columns)}")
     pool, unmatched = dk.pool_from_entry_file(ef, projections)
+    if args.lines:
+        pool, no_line = dk.apply_lines(pool, dk.read_lines(args.lines, ef.players))
+        print(f"Vegas lines set for {pool['team'].nunique() - len(no_line)} of {pool['team'].nunique()} teams"
+              + (f"; missing: {', '.join(no_line)}" if no_line else ""))
+    if args.week:
+        nfl = _nflverse(args)
+        pool = om.prepare(pool, nfl, args.season, args.week)
+        filled = pool["team_total"].notna().sum()
+        print(f"nflverse inputs for {args.season} Week {args.week}: lines for {filled}/{len(pool)} players, "
+              f"last week's points for {pool['last_dk'].notna().sum()}, "
+              f"{int((pool['vacated'] > 0).sum())} players with injured teammates' volume to absorb")
     if args.estimate_own or args.own_blend:
         est = ownership.estimate_ownership(pool)
+        pool["own_model"] = est.where(pool["proj"].notna())
         given = pd.to_numeric(pool["own"], errors="coerce")
         given = given / 100.0 if given.max() > 1.5 else given
+        _own_disagreements(pool, given)
         if args.own_blend:
             blended = (1 - args.own_blend) * given + args.own_blend * est
             pool["own"] = blended.where(given.notna(), est if args.estimate_own else given)
             print(f"Blended ownership: {args.own_blend:.0%} estimate / {1 - args.own_blend:.0%} provided")
         else:
             pool["own"] = given.where(given.notna(), est)
-            print(f"Estimated ownership for {int(given.isna().sum())} players without one "
-                  "(value-ranked, real-Milly concentration curves)")
+            n_est = int((given.isna() & pool["proj"].notna()).sum())
+            print(f"Estimated ownership for {n_est} projected players without one (our model)")
         pool.loc[pool["proj"].isna(), "own"] = np.nan
     if args.own_sharpen and args.own_sharpen != 1.0:
         given = pd.to_numeric(pool["own"], errors="coerce")
         pool["own"] = ownership.sharpen_ownership(given, pool["position"], args.own_sharpen)
         print(f"Sharpened ownership chalk (gamma={args.own_sharpen})")
-    if args.lines:
-        pool, no_line = dk.apply_lines(pool, dk.read_lines(args.lines, ef.players))
-        print(f"Vegas lines set for {pool['team'].nunique() - len(no_line)} of {pool['team'].nunique()} teams"
-              + (f"; missing: {', '.join(no_line)}" if no_line else ""))
     if pool["own"].notna().any():
         for note in ownership.check_ownership(pool[pool["proj"].notna()]):
             print(f"  ownership check: {note}")
@@ -427,6 +437,37 @@ def cmd_dk_pool(args: argparse.Namespace) -> None:
     else:
         print("No --projections given: proj/own/ceiling are blank (sgo-enrich can fill proj).")
     print(f"Wrote pool to {args.out}")
+
+
+def _own_disagreements(pool: pd.DataFrame, given: pd.Series, n: int = 6) -> None:
+    """Where our ownership model and the provided projection disagree most (leverage scouting)."""
+    d = pool.assign(_given=given, _gap=pool["own_model"] - given).dropna(subset=["_gap"])
+    if d.empty or d["_given"].isna().all():
+        return
+    fmt = lambda r: f"{r['name']} ({r['position']}) {r['_given']:.0%} -> {r['own_model']:.0%}"  # noqa: E731
+    print("  ownership, provided -> our model; we expect MORE: "
+          + "; ".join(fmt(r) for _, r in d.nlargest(n, "_gap").iterrows()))
+    print("  ... we expect LESS: " + "; ".join(fmt(r) for _, r in d.nsmallest(n, "_gap").iterrows()))
+
+
+def _nflverse(args: argparse.Namespace) -> dict:
+    nfl = om.load_nflverse(args.nflverse, args.season)
+    if len(nfl) < 4 or args.refresh_nflverse:
+        print(f"Downloading nflverse schedule/lines, weekly stats and injuries to {args.nflverse} ...")
+        om.fetch_nflverse(args.season, args.nflverse)
+        nfl = om.load_nflverse(args.nflverse, args.season)
+    return nfl
+
+
+def _add_nflverse_args(p: argparse.ArgumentParser, week: bool = True) -> None:
+    p.add_argument("--season", type=int, default=2026)
+    if week:
+        p.add_argument("--week", type=int, default=None,
+                       help="NFL week: fills missing Vegas lines from the nflverse schedule and adds the "
+                            "ownership model's inputs (last week's points, season FPPG, injured teammates)")
+    p.add_argument("--nflverse", default="data/nflverse",
+                   help="folder for nflverse files (downloaded on first use)")
+    p.add_argument("--refresh-nflverse", action="store_true", help="re-download (new injury reports, scores)")
 
 
 def cmd_dk_contests(args: argparse.Namespace) -> None:
@@ -616,19 +657,30 @@ def _week_actuals(proj_path: str, standings_path: str) -> pd.DataFrame:
 
 
 def cmd_own_fit(args: argparse.Namespace) -> None:
-    weeks = []
-    for proj_path, standings_path in args.week:
+    nfl = _nflverse(args)
+    weeks, labels = [], []
+    for proj_path, standings_path, week in args.week:
         w = _week_actuals(proj_path, standings_path)
         if "salary" not in w.columns:
             raise SystemExit(f"{proj_path} has no salary column (needed for the model)")
-        weeks.append(w)
-        print(f"{proj_path}: {len(w)} players matched to {standings_path}")
-    model = ownership.fit_ownership_model(weeks)
+        weeks.append(om.prepare(w, nfl, args.season, int(week)))
+        labels.append(int(week))
+        print(f"Week {week}: {len(w)} players in {proj_path} matched to {standings_path}")
+    if len(weeks) >= 2:
+        print("Leave-one-week-out (fit on the other weeks, score this one):")
+        for wk, r in zip(labels, om.cross_validate(weeks, l2=args.l2)):
+            line = (f"  Week {wk}: ours corr {r['ours']['corr']:.2f}, MAE {r['ours']['mae']:.1%}, "
+                    f"top-10 chalk {r['ours']['top10_hit']}/10")
+            if "published" in r:
+                line += (f" | provided own corr {r['published']['corr']:.2f}, MAE {r['published']['mae']:.1%}, "
+                         f"top-10 {r['published']['top10_hit']}/10")
+            print(line)
+    coef = om.fit(weeks, l2=args.l2)
     prof = history.load_profile(args.profile)
-    prof["own_model"] = model
+    prof["own_model_v2"] = {"coef": coef, "l2": args.l2, "season": args.season, "weeks": labels}
     history.save_profile(prof, args.profile)
-    for p, c in model.items():
-        print(f"  {p:<3} n={c['n']:<3} value {c['value']:+.2f}  proj {c['proj']:+.2f}  salary {c['salary']:+.2f}")
+    for p, c in coef.items():
+        print(f"  {p:<3} n={c['n']:<3} " + "  ".join(f"{f} {c[f]:+.2f}" for f in om.FEATURES))
     print(f"Saved ownership model to {args.profile}")
 
 
@@ -807,6 +859,7 @@ def main() -> None:
                             "use own-eval on past weeks to choose it")
     p_dkp.add_argument("--lines", default=None,
                        help="Vegas lines CSV: team, spread, total (one team per game is enough)")
+    _add_nflverse_args(p_dkp)
     p_dkp.add_argument("--out", required=True)
     p_dkp.set_defaults(func=cmd_dk_pool)
 
@@ -858,10 +911,14 @@ def main() -> None:
     p_oe.add_argument("--standings", required=True, help="that week's contest-standings CSV/ZIP")
     p_oe.set_defaults(func=cmd_own_eval)
 
-    p_of = sub.add_parser("own-fit", help="Fit the fallback ownership model to past weeks' actual %%Drafted")
-    p_of.add_argument("--week", nargs=2, action="append", required=True, metavar=("PROJECTIONS", "STANDINGS"),
-                      help="a week's projections file (with salary) and its contest-standings CSV/ZIP; repeat")
+    p_of = sub.add_parser("own-fit", help="Fit our ownership model to past weeks' actual %%Drafted")
+    p_of.add_argument("--week", nargs=3, action="append", required=True,
+                      metavar=("PROJECTIONS", "STANDINGS", "WEEK"),
+                      help="a week's projections file (with salary), its contest-standings CSV/ZIP and "
+                           "the NFL week number; repeat for each week")
+    p_of.add_argument("--l2", type=float, default=0.1, help="regularization (higher = flatter, safer)")
     p_of.add_argument("--profile", default=str(ownership.PROFILE_PATH))
+    _add_nflverse_args(p_of, week=False)
     p_of.set_defaults(func=cmd_own_fit)
 
     p_cm = sub.add_parser("corr-measure", help="Measure real player-pair correlations from nflverse "

@@ -22,6 +22,7 @@ from test_contest import *  # noqa: E402,F401,F403
 from test_dk import *  # noqa: E402,F401,F403
 from test_history import *  # noqa: E402,F401,F403
 from test_correlations import *  # noqa: E402,F401,F403
+from test_ownership_model import *  # noqa: E402,F401,F403
 
 POOL_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "sample_classic_pool.csv")
 
