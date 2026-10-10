@@ -94,8 +94,39 @@ def load_nflverse(out_dir: str, season: int) -> dict[str, pd.DataFrame]:
     return out
 
 
+def attach_profiles(df: pd.DataFrame, weekly: pd.DataFrame, season: int, week: int,
+                    prior_weekly: pd.DataFrame | None = None) -> pd.DataFrame:
+    """
+    Season-to-date `tgt_pg` (targets/game), `car_pg` (carries/game) and
+    `rush_share` (share of DK points from rushing) per player -- the
+    profiles the simulation's QB-receiver links use. Week 1 uses last season.
+    """
+    out = df.copy()
+    past = weekly[(weekly["season"] == season) & (weekly["week"] < week)]
+    if past.empty and prior_weekly is not None:
+        past = prior_weekly[prior_weekly["season_type"] == "REG"]
+    if past.empty:
+        return out
+    k = past["player_display_name"].map(normalize_name)
+    col = lambda c: past[c].fillna(0) if c in past else pd.Series(0.0, index=past.index)  # noqa: E731
+    rush = 0.1 * col("rushing_yards") + 6 * col("rushing_tds")
+    g = pd.DataFrame({"k": k, "tgt": col("targets"), "car": col("carries"),
+                      "rush": rush, "dk": dk_points(past).to_numpy()}).groupby("k")
+    prof = pd.DataFrame({"tgt_pg": g["tgt"].mean(), "car_pg": g["car"].mean(),
+                         "rush_share": (g["rush"].sum() / g["dk"].sum().clip(lower=1)).clip(0, 1)})
+    key = out["name"].map(normalize_name)
+    for c in prof.columns:
+        out[c] = key.map(prof[c])
+    out.loc[out["position"] == "DST", list(prof.columns)] = np.nan
+    return out
+
+
 def prepare(df: pd.DataFrame, nfl: dict[str, pd.DataFrame], season: int, week: int) -> pd.DataFrame:
-    """Add every model input nflverse can supply: lines (where missing), last_dk, avg_dk, vacated."""
+    """
+    Add every input nflverse can supply: lines (where missing), last_dk,
+    avg_dk, vacated (ownership model) and tgt_pg / car_pg / rush_share
+    (simulation profiles).
+    """
     out = df
     if "games" in nfl:
         out = attach_schedule(out, nfl["games"], season, week)
@@ -103,6 +134,7 @@ def prepare(df: pd.DataFrame, nfl: dict[str, pd.DataFrame], season: int, week: i
         out = attach_recency(out, nfl["weekly"], season, week)
         out = attach_usage(out, nfl["weekly"], season, week, injuries=nfl.get("injuries"),
                            prior_weekly=nfl.get("prior_weekly"))
+        out = attach_profiles(out, nfl["weekly"], season, week, prior_weekly=nfl.get("prior_weekly"))
     return out
 
 

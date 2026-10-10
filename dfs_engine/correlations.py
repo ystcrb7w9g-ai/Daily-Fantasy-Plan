@@ -92,6 +92,12 @@ def measure(paths: list[str]) -> dict:
             continue
         x = o[[a, b + "_opp"]].dropna()
         out["opponent"][f"{a}~opp {b}"] = {"corr": round(float(x[a].corr(x[b + "_opp"])), 3), "n": int(len(x))}
+    out["heterogeneity"] = measure_heterogeneity(d, t)
+    prof = player_profiles(d).merge(d[["season", "team", "player_id", "role"]].drop_duplicates(),
+                                    on=["season", "team", "player_id"])
+    out["role_profile"] = {r: {"tgt_pg": round(float(g["tgt_pg"].mean()), 2),
+                               "rush_share": round(float(g["rush_share"].mean()), 3)}
+                           for r, g in prof.groupby("role")}
     # Backup-RB question: how RB1 and RB2 do when the offense explodes.
     rb = t[["RB1", "RB2", "team_tds"]].dropna()
     big = rb["team_tds"] >= 5
@@ -105,6 +111,41 @@ def measure(paths: list[str]) -> dict:
         "p_both_rbs_15plus_5plus_tds": round(float(((rb.loc[big, "RB1"] >= 15) & (rb.loc[big, "RB2"] >= 15)).mean()), 3),
         "p_both_rbs_15plus_normal": round(float(((rb.loc[~big, "RB1"] >= 15) & (rb.loc[~big, "RB2"] >= 15)).mean()), 3),
     }
+    return out
+
+
+HETERO_PAIRS = [  # (pair, profile column, role it describes)
+    (("QB1", "WR1"), "rush_share", "QB1"),
+    (("QB1", "TE1"), "rush_share", "QB1"),
+    (("QB1", "WR1"), "tgt_pg", "WR1"),
+    (("QB1", "TE1"), "tgt_pg", "TE1"),
+    (("QB1", "RB1"), "tgt_pg", "RB1"),
+]
+
+
+def player_profiles(d: pd.DataFrame) -> pd.DataFrame:
+    """Season profile per player: targets/game, carries/game and share of DK points from rushing."""
+    col = lambda c: d[c].fillna(0) if c in d else 0.0  # noqa: E731
+    rush_dk = 0.1 * col("rushing_yards") + 6 * col("rushing_tds")
+    g = d.assign(rush_dk=rush_dk, tgt=col("targets"), car=col("carries")).groupby(
+        ["season", "team", "player_id"])
+    out = g.agg(rush_dk=("rush_dk", "sum"), dk=("dk", "sum"), tgt_pg=("tgt", "mean"), car_pg=("car", "mean"))
+    out["rush_share"] = (out["rush_dk"] / out["dk"].clip(lower=1)).clip(0, 1)
+    return out.drop(columns=["rush_dk", "dk"]).reset_index()
+
+
+def measure_heterogeneity(d: pd.DataFrame, t: pd.DataFrame) -> dict:
+    """Pair correlations within terciles of a player's profile (`HETERO_PAIRS`), with each tercile's mean."""
+    prof = player_profiles(d)
+    roles = d[["season", "week", "team", "player_id", "role"]].merge(prof, on=["season", "team", "player_id"])
+    out = {}
+    for (a, b), col, who in HETERO_PAIRS:
+        r = roles[roles["role"] == who][["season", "week", "team", col]]
+        x = t.merge(r, on=["season", "week", "team"])[[a, b, col]].dropna()
+        x["q"] = pd.qcut(x[col].rank(method="first"), 3, labels=False)  # ties split evenly
+        out[f"{a}~{b} by {who} {col}"] = [
+            {"mean": round(float(g[col].mean()), 3), "corr": round(float(g[a].corr(g[b])), 3), "n": int(len(g))}
+            for _, g in x.groupby("q")]
     return out
 
 
@@ -154,6 +195,53 @@ def simulated_correlations(df: pd.DataFrame, scores: np.ndarray) -> dict:
     return out
 
 
+def hetero_slate(profile: dict, n_games: int = 9) -> pd.DataFrame:
+    """
+    `synthetic_slate` plus player profiles: each team's QB1 rush share and
+    WR1 / TE1 / RB1 targets per game take the measured tercile means
+    (cycled independently across teams); other roles get role averages.
+    """
+    df = synthetic_slate(profile["role_means"], n_games=n_games)
+    rp, het = profile["role_profile"], profile["heterogeneity"]
+    df["tgt_pg"] = df["role"].map(lambda r: rp.get(r, {}).get("tgt_pg", np.nan))
+    df["rush_share"] = np.where(df["role"] == "QB1", rp["QB1"]["rush_share"], np.nan)
+    teams = list(dict.fromkeys(df["team"]))
+    plan = {"QB1": ("rush_share", "QB1~WR1 by QB1 rush_share", 0), "WR1": ("tgt_pg", "QB1~WR1 by WR1 tgt_pg", 1),
+            "TE1": ("tgt_pg", "QB1~TE1 by TE1 tgt_pg", 2), "RB1": ("tgt_pg", "QB1~RB1 by RB1 tgt_pg", 3)}
+    for role, (col, key, shift) in plan.items():
+        means = [b["mean"] for b in het[key]]
+        for i, t in enumerate(teams):
+            df.loc[(df["team"] == t) & (df["role"] == role), col] = means[(i // (1 + shift) + shift) % 3]
+    return df
+
+
+def simulated_heterogeneity(df: pd.DataFrame, scores: np.ndarray, profile: dict) -> dict:
+    """Simulated pair correlations per profile tercile, keyed like `measure_heterogeneity`."""
+    out = {}
+    role, team = df["role"].to_numpy(), df["team"].to_numpy()
+    for (a, b), col, who in HETERO_PAIRS:
+        key = f"{a}~{b} by {who} {col}"
+        means = [x["mean"] for x in profile["heterogeneity"][key]]
+        per = [[] for _ in means]
+        for t in dict.fromkeys(team):
+            ia = np.flatnonzero((team == t) & (role == a))
+            ib = np.flatnonzero((team == t) & (role == b))
+            iw = np.flatnonzero((team == t) & (role == who))
+            if len(ia) and len(ib) and len(iw):
+                v = df[col].to_numpy()[iw[0]]
+                per[int(np.argmin([abs(v - m) for m in means]))].append(
+                    np.corrcoef(scores[:, ia[0]], scores[:, ib[0]])[0, 1])
+        out[key] = [{"mean": m, "corr": round(float(np.mean(c)), 3) if c else float("nan")}
+                    for m, c in zip(means, per)]
+    return out
+
+
+def heterogeneity_error(profile: dict, simulated: dict) -> float:
+    gaps = [s["corr"] - m["corr"] for k, v in profile["heterogeneity"].items() if k in simulated
+            for m, s in zip(v, simulated[k]) if np.isfinite(s["corr"])]
+    return float(np.sqrt(np.mean(np.square(gaps)))) if gaps else 0.0
+
+
 def correlation_error(measured: dict, simulated: dict) -> float:
     """Root-mean-square gap between measured and simulated role-pair correlations."""
     gaps = [simulated[k][pair]["corr"] - v["corr"]
@@ -166,16 +254,24 @@ def fit_simulation(profile: dict, grid: dict, n_trials: int = 4000, seed: int = 
     """
     Grid-search the simulation's correlation knobs (`grid`: {kwarg: [values]})
     to minimize `correlation_error` against a measured profile on a
-    `synthetic_slate`. Returns (best kwargs, best error, all results).
+    `synthetic_slate` -- or, when the profile has heterogeneity terciles, on
+    a `hetero_slate`, averaging in `heterogeneity_error`. Returns (best
+    kwargs, best error, all results).
     """
     if simulate is None:
         from .simulate import simulate_player_scores as simulate
-    df = synthetic_slate(profile["role_means"])
+    hetero = "heterogeneity" in profile and "role_profile" in profile
+    df = hetero_slate(profile) if hetero else synthetic_slate(profile["role_means"])
     keys = list(grid)
     results = []
     for combo in itertools.product(*(grid[k] for k in keys)):
         kw = dict(zip(keys, combo))
-        sim = simulated_correlations(df, simulate(df, n_trials=n_trials, seed=seed, **kw))
-        results.append((kw, correlation_error(profile, sim), sim))
+        sc = simulate(df, n_trials=n_trials, seed=seed, **kw)
+        sim = simulated_correlations(df, sc)
+        err = correlation_error(profile, sim)
+        if hetero:  # role pairs and profile terciles count equally
+            sim["heterogeneity"] = simulated_heterogeneity(df, sc, profile)
+            err = 0.5 * err + 0.5 * heterogeneity_error(profile, sim["heterogeneity"])
+        results.append((kw, err, sim))
     best = min(results, key=lambda r: r[1])
     return best[0], best[1], results

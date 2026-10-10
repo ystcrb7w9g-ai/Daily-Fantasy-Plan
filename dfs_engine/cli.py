@@ -873,14 +873,21 @@ def _add_sgo_fetch_args(p: argparse.ArgumentParser) -> None:
 def cmd_corr_measure(args: argparse.Namespace) -> None:
     from . import correlations as corr
     prof = corr.measure(args.weekly)
-    df = corr.synthetic_slate(prof["role_means"])
-    sim = corr.simulated_correlations(df, simulate_player_scores(df, n_trials=args.trials, seed=0))
+    df = corr.hetero_slate(prof)
+    scores = simulate_player_scores(df, n_trials=args.trials, seed=0)
+    sim = corr.simulated_correlations(df, scores)
+    het = corr.simulated_heterogeneity(df, scores, prof)
     print(f"{prof['team_games']} team-games, seasons {prof['seasons']}")
     print(f"{'pair':18s} {'real':>7s} {'sim':>7s}")
     for k in ("same_team", "opponent"):
         for pair, v in prof[k].items():
             print(f"{pair:18s} {v['corr']:+7.3f} {sim[k][pair]['corr']:+7.3f}")
     print(f"RMS gap {corr.correlation_error(prof, sim):.3f}")
+    print("By player profile (terciles, low / mid / high):")
+    for k, v in prof["heterogeneity"].items():
+        print(f"  {k:28s} real " + " ".join(f"{b['corr']:+.2f}" for b in v)
+              + "   sim " + " ".join(f"{b['corr']:+.2f}" for b in het[k]))
+    print(f"  RMS gap {corr.heterogeneity_error(prof, het):.3f}")
     b = prof["rb_blowouts"]
     print(f"Both RBs 15+ DK pts: {b['p_both_rbs_15plus_5plus_tds']:.1%} when the offense scores 5+ TDs "
           f"vs {b['p_both_rbs_15plus_normal']:.1%} otherwise")

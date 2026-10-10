@@ -73,3 +73,34 @@ def test_simulate_handles_qbs_at_one_salary():
     prof = load_profile(os.path.join(ROOT, "data", "correlation_profile.json"))
     df = corr.synthetic_slate(prof["role_means"], n_games=2)
     assert simulate_player_scores(df, n_trials=50, seed=1).shape == (50, len(df))
+
+
+def test_profiles_drive_qb_links_like_real_games():
+    prof = load_profile(os.path.join(ROOT, "data", "correlation_profile.json"))
+    df = corr.hetero_slate(prof)
+    sc = simulate_player_scores(df, n_trials=3000, seed=2)
+    het = corr.simulated_heterogeneity(df, sc, prof)
+    rush = [b["corr"] for b in het["QB1~WR1 by QB1 rush_share"]]
+    wr = [b["corr"] for b in het["QB1~WR1 by WR1 tgt_pg"]]
+    rb = [b["corr"] for b in het["QB1~RB1 by RB1 tgt_pg"]]
+    assert rush[0] > rush[2] + 0.05          # pocket passers tie to their WR1 more than running QBs
+    assert wr[2] > wr[0] + 0.05              # high-target WR1s tie to their QB more
+    assert rb[2] > rb[0] and max(rb) < 0.25  # pass-catching backs a little, never like a WR
+    assert corr.heterogeneity_error(prof, het) < 0.08
+    # without profiles the sim falls back to role-only links (no heterogeneity)
+    flat = df.drop(columns=["tgt_pg", "rush_share"])
+    het0 = corr.simulated_heterogeneity(df, simulate_player_scores(flat, n_trials=3000, seed=2), prof)
+    r0 = [b["corr"] for b in het0["QB1~WR1 by QB1 rush_share"]]
+    assert abs(r0[0] - r0[2]) < abs(rush[0] - rush[2])
+
+
+def test_attach_profiles_season_to_date():
+    from dfs_engine import ownership_model as om
+    weekly = pd.DataFrame({"season": [2026, 2026, 2026], "week": [1, 2, 3], "season_type": "REG",
+                           "player_display_name": ["Run Qb"] * 3, "rushing_yards": [100.0, 0.0, 50.0],
+                           "rushing_tds": [0, 0, 0], "targets": [0, 0, 0], "carries": [10, 0, 5],
+                           "passing_yards": [100.0, 250.0, 0.0]})
+    df = pd.DataFrame({"name": ["Run QB"], "position": ["QB"]})
+    out = om.attach_profiles(df, weekly, 2026, 3)  # weeks 1-2 only
+    assert abs(out.loc[0, "car_pg"] - 5.0) < 1e-9
+    assert abs(out.loc[0, "rush_share"] - 10.0 / (10.0 + 4.0 + 10.0 + 3.0)) < 1e-9  # 100-yd bonus is not rushing share

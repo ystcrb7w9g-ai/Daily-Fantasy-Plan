@@ -75,6 +75,7 @@ def qb_variance_multiplier(salary: pd.Series) -> pd.Series:
 # (data/field_profile.json); `contest` / `dk-run` re-fit it per slate.
 BASE_CEILING_MULT = {"QB": 1.55, "RB": 1.85, "WR": 1.90, "TE": 1.90, "DST": 2.00}
 DEFAULT_SPREAD_SCALE = 0.80
+RUSH_REF = 0.15  # average QB1 share of DK points from rushing (2021-25: 0.158)
 
 
 def fill_default_ceilings(ceiling: np.ndarray, proj: np.ndarray, position: pd.Series,
@@ -98,6 +99,10 @@ def simulate_player_scores(
     rb_competition_weight: float = 0.30,
     qb_catcher_link: float = 0.85,
     shootout_sd: float = 0.20,
+    qb_rush_power: float = 2.0,
+    target_power: float = 1.0,
+    rb_link_weight: float = 0.25,
+    te_link_weight: float = 1.5,
     calibrate_ceiling: bool = True,
     ceiling_pct: float = 0.85,
     spread_scale: float | None = DEFAULT_SPREAD_SCALE,
@@ -110,6 +115,10 @@ def simulate_player_scores(
     fit (`correlations.fit_simulation`) against role-pair correlations of
     real DK scores, 2021-25 regular seasons (data/correlation_profile.json):
     QB1~WR1 +0.38, WR1~WR2 +0.09, RB1~RB2 -0.07, QB1~opp QB1 +0.19.
+    With `tgt_pg` / `rush_share` columns (`ownership_model.prepare`) the QB
+    link also follows player profiles, fitted to real terciles: QB1~WR1
+    +0.46 for pocket passers vs +0.33 for running QBs, +0.29 vs +0.42 for
+    low- vs high-target WR1s, QB1~RB1 +0.04 vs +0.14 by RB targets.
 
     Returns
     -------
@@ -201,21 +210,38 @@ def simulate_player_scores(
                 idiosyncratic[:, grp_mask] -= rb_competition_weight * grp_mean
 
     # --- 5c. A QB's passing line is his receivers' production: tie his
-    # player-level noise to the (sqrt-)projection-weighted noise of his team's
-    # pass catchers (`qb_catcher_link` = share of his noise variance) ---
+    # player-level noise to his team's receivers' noise. With a `tgt_pg`
+    # column (targets/game) receivers are weighted by targets**target_power
+    # and RBs join in by their targets (times rb_link_weight, since most of
+    # an RB's points come from rushing); otherwise WR/TE by sqrt(proj). A
+    # QB's link share shrinks with the share of his points from rushing
+    # (`rush_share`): ((1 - rush) / (1 - RUSH_REF)) ** qb_rush_power. ---
     if qb_catcher_link:
-        proj_arr = df["proj"].to_numpy(dtype=float)
+        proj_arr = df["proj"].to_numpy(dtype=float).clip(min=0.1)
+        pos_arr = df["position"].to_numpy()
+        tgt = df["tgt_pg"].to_numpy(dtype=float) if "tgt_pg" in df else np.full(n_players, np.nan)
+        known = np.isin(pos_arr, ["WR", "TE", "RB"]) & np.isfinite(tgt) & (tgt > 0)
+        if known.any():
+            receivers = np.isin(pos_arr, ["WR", "TE", "RB"])
+            scale = np.median(tgt[known] / np.sqrt(proj_arr[known]))
+            guess = scale * np.sqrt(proj_arr) * np.where(pos_arr == "RB", 0.4, 1.0)
+            w_all = np.where(known, tgt, guess) ** target_power
+            w_all = w_all * np.where(pos_arr == "RB", rb_link_weight, np.where(pos_arr == "TE", te_link_weight, 1.0))
+        else:
+            receivers, w_all = pass_catcher_mask, np.sqrt(proj_arr)
+        rush = df["rush_share"].to_numpy(dtype=float) if "rush_share" in df else np.full(n_players, np.nan)
         for team in df["team"].unique():
             on_team = (df["team"] == team).to_numpy()
-            qbs = np.flatnonzero(on_team & (df["position"] == "QB").to_numpy())
-            catchers = on_team & pass_catcher_mask
+            qbs = np.flatnonzero(on_team & (pos_arr == "QB"))
+            catchers = on_team & receivers
             if not len(qbs) or not catchers.any():
                 continue
-            w = np.sqrt(proj_arr[catchers].clip(min=0.1))
-            link = idiosyncratic[:, catchers] @ w
+            link = idiosyncratic[:, catchers] @ w_all[catchers]
             link = (link - link.mean()) / (link.std() or 1.0)
-            idiosyncratic[:, qbs] = (np.sqrt(1 - qb_catcher_link) * idiosyncratic[:, qbs]
-                                     + np.sqrt(qb_catcher_link) * link[:, None])
+            for q in qbs:
+                rs = min(rush[q], 0.4) if np.isfinite(rush[q]) else RUSH_REF  # fitted range
+                L = float(np.clip(qb_catcher_link * ((1 - rs) / (1 - RUSH_REF)) ** qb_rush_power, 0.05, 0.98))
+                idiosyncratic[:, q] = np.sqrt(1 - L) * idiosyncratic[:, q] + np.sqrt(L) * link
 
     # --- 6. Residual skewed noise ---
     residual = np.column_stack([

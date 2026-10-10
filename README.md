@@ -58,7 +58,25 @@ shared, correlated factors — the same basic approach real sim-based tools
 
    Before this fit, every pair in the sim was correlated at +0.3 to +0.5,
    because the team factor swamped everything else. That over-rewarded
-   stacking whole teams. Refresh it each season with:
+   stacking whole teams.
+
+   **Correlations also depend on the player** (the "similar historical
+   pairs" idea from Bergman et al.). With `dk-pool --week N`, each
+   player gets his season targets per game and, for QBs, the share of
+   points from rushing. The QB's link to his receivers then follows
+   those profiles, fitted to real terciles (low / mid / high):
+
+   | pair, split by | real | sim |
+   |---|---|---|
+   | QB1~WR1 by QB rushing share | +0.46 / +0.42 / +0.33 | +0.45 / +0.34 / +0.34 |
+   | QB1~WR1 by WR1 targets | +0.30 / +0.40 / +0.43 | +0.27 / +0.40 / +0.45 |
+   | QB1~TE1 by TE1 targets | +0.28 / +0.26 / +0.39 | +0.22 / +0.37 / +0.48 |
+   | QB1~RB1 by RB1 targets | +0.04 / +0.10 / +0.14 | +0.08 / +0.09 / +0.12 |
+
+   Stacking a running QB (Josh Allen, Lamar Jackson) buys less
+   correlation than stacking a pocket passer, and pass-catching backs
+   belong in QB stacks a little. Without those columns the sim falls back
+   to role-only links. Refresh it each season with:
    `python -m dfs_engine.cli corr-measure --weekly stats_player_week_2021.csv ... --out data/correlation_profile.json`
    ([nflverse weekly files](https://github.com/nflverse/nflverse-data/releases/tag/stats_player)).
 9. **Default ceilings fitted to real contests**: players without a
