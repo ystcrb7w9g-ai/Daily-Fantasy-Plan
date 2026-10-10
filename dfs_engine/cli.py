@@ -339,8 +339,9 @@ def cmd_contest(args: argparse.Namespace) -> None:
     cand_w = cs.lineups_to_weights(candidates, len(df))
     result = cs.simulate_contest(cand_w, field, eval_scores, payout)
 
-    chosen = _pick_for_contest(df, candidates, result, args.n_lineups, args)
-    print(f"Selected {len(chosen)}/{args.n_lineups} lineups (objective={args.objective}).")
+    chosen = _pick_for_contest(df, candidates, result, args.n_lineups, args, contest_size=payout.contest_size)
+    print(f"Selected {len(chosen)}/{args.n_lineups} lineups "
+          f"(objective={_objective(args, payout.contest_size)}).")
 
     # Re-grade the chosen lineups on fresh sims: selecting the best of
     # thousands on one sim set overstates them (winner's curse).
@@ -493,15 +494,26 @@ def _contest_payout(row) -> "cs.PayoutCurve":
     )
 
 
-def _pick_for_contest(df, candidates, result, n, args, exclude=frozenset()) -> list[int]:
+AUTO_TOP1_SIZE = 10_000
+
+
+def _objective(args: argparse.Namespace, contest_size: int) -> str:
+    """'auto': top-1% coverage for big GPPs, expected payout for smaller contests."""
+    if args.objective != "auto":
+        return args.objective
+    return "top1" if contest_size >= AUTO_TOP1_SIZE else "roi"
+
+
+def _pick_for_contest(df, candidates, result, n, args, exclude=frozenset(), contest_size=None) -> list[int]:
     kw = _portfolio_kwargs(args)
+    objective = _objective(args, contest_size or 0)
     chosen = cs.select_portfolio(
-        df, candidates, result, n, objective=args.objective, min_unique=args.min_unique,
+        df, candidates, result, n, objective=objective, min_unique=args.min_unique,
         dst_cap=args.dst_cap, max_exposure=args.max_exposure, exclude=set(exclude), **kw,
     )
     if len(chosen) < n:  # caps/uniqueness too tight for this pool: relax, don't leave entries blank
         more = cs.select_portfolio(
-            df, candidates, result, n - len(chosen), objective=args.objective, min_unique=1,
+            df, candidates, result, n - len(chosen), objective=objective, min_unique=1,
             dst_cap=1.0, max_exposure=1.0, tiered_caps=False, exclude=set(chosen) | set(exclude),
             **kw,  # keep the punt / RB-pair / game-stack share caps
         )
@@ -563,7 +575,7 @@ def cmd_dk_run(args: argparse.Namespace) -> None:
         payout = _contest_payout(row)
         n = int(row["our_entries"])
         result = cs.score_contest(ranks, payout)
-        chosen = _pick_for_contest(df, candidates, result, n, args,
+        chosen = _pick_for_contest(df, candidates, result, n, args, contest_size=payout.contest_size,
                                    exclude=taken if args.unique_across_contests else frozenset())
         taken.update(chosen)
         hold = cs.score_contest(hold_ranks, payout)
@@ -920,7 +932,9 @@ def main() -> None:
     p_con.add_argument("--min-cash-mult", type=float, default=2.0)
     p_con.add_argument("--payouts", default=None,
                        help="real payout CSV (rank_min,rank_max,payout); overrides the stylized curve")
-    p_con.add_argument("--objective", choices=["roi", "top1"], default="roi")
+    p_con.add_argument("--objective", choices=["auto", "roi", "top1", "emax"], default="auto",
+                       help="auto (default): top1 for contests of %d+ entries, roi below; emax = "
+                            "Bergman-style best-entry payout" % AUTO_TOP1_SIZE)
     p_con.add_argument("--min-unique", type=int, default=2)
     p_con.add_argument("--dst-cap", type=float, default=0.22)
     p_con.add_argument("--max-exposure", type=float, default=1.0)
@@ -999,7 +1013,9 @@ def main() -> None:
     p_dkr.add_argument("--field-stack-mix", default=",".join(map(str, cs.DEFAULT_STACK_MIX)),
                        help="field share with 0,1,2+ of the QB's own WR/TE ('none' to disable; "
                             "default %(default)s, measured in real Millys)")
-    p_dkr.add_argument("--objective", choices=["roi", "top1"], default="roi")
+    p_dkr.add_argument("--objective", choices=["auto", "roi", "top1", "emax"], default="auto",
+                       help="auto (default): top1 for contests of %d+ entries, roi below; emax = "
+                            "Bergman-style best-entry payout" % AUTO_TOP1_SIZE)
     p_dkr.add_argument("--min-unique", type=int, default=2)
     p_dkr.add_argument("--dst-cap", type=float, default=0.22)
     p_dkr.add_argument("--max-exposure", type=float, default=1.0)

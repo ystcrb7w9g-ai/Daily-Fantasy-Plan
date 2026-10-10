@@ -751,6 +751,9 @@ def select_portfolio(
                        outcomes in which *some* portfolio lineup finishes
                        top 1% (rewards lineups that win in different
                        worlds), ties broken by expected payout.
+    objective="emax" : each pick maximizes E[best payout among the picks]
+                       (Bergman et al.: entries should play off each other
+                       -- one 1st and one last beats two mid-pack cashes).
     Exposure caps are the same ownership-tiered caps as `build`, plus a
     global `max_exposure`; lineups must differ from every pick by at least
     `min_unique` players. `tiered_caps=False` drops the ownership tiers
@@ -761,8 +764,8 @@ def select_portfolio(
     picks, so one punt that scores zero can't sink every lineup;
     `max_rb_pair_share` caps the share of picks with two RBs from one team.
     """
-    if objective not in ("roi", "top1"):
-        raise ValueError("objective must be 'roi' or 'top1'")
+    if objective not in ("roi", "top1", "emax"):
+        raise ValueError("objective must be 'roi', 'top1' or 'emax'")
     n_players = len(df)
     is_dst = (df["position"] == "DST").to_numpy()
     tiered = df["own"].apply(default_exposure_cap).to_numpy() if tiered_caps else np.ones(n_players)
@@ -789,12 +792,21 @@ def select_portfolio(
         available[list(exclude)] = False
     covered = np.zeros(result.top1.shape[0], dtype=np.float32)
     top1_f = result.top1.astype(np.float32) if objective == "top1" else None
+    best_pay = np.zeros(result.payouts.shape[0], dtype=np.float32)
 
     while len(chosen) < n_lineups and available.any():
         if objective == "roi":
             score = ev.copy()
-        else:
+        elif objective == "top1":
             score = (1.0 - covered) @ top1_f + 1e-6 * ev / max(ev.max(), 1e-9)
+        else:
+            gain = np.zeros(len(candidates))
+            live = np.flatnonzero(available)
+            for b0 in range(0, len(live), 512):
+                cols = live[b0:b0 + 512]
+                gain[cols] = (np.maximum(result.payouts[:, cols], best_pay[:, None])
+                              - best_pay[:, None]).mean(axis=0)
+            score = gain + 1e-6 * ev / max(ev.max(), 1e-9)
         score[~available] = -np.inf
 
         picked = None
@@ -821,6 +833,8 @@ def select_portfolio(
         counts[candidates[picked].player_ids] += 1
         if objective == "top1":
             covered = np.maximum(covered, top1_f[:, picked])
+        elif objective == "emax":
+            best_pay = np.maximum(best_pay, result.payouts[:, picked])
     return chosen
 
 

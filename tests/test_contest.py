@@ -278,3 +278,21 @@ def test_soft_showdown_rules_add_rb_pairs_and_share_cap_limits_them():
     chosen = cs.select_portfolio(df, both, res, 10, min_unique=1, tiered_caps=False, dst_cap=1.0,
                                  max_rb_pair_share=0.2)
     assert len(chosen) > 0 and sum(pairs[i] for i in chosen) <= 2
+
+
+def test_emax_objective_starts_at_best_ev_and_grows_best_entry_payout():
+    df, cands, res = _graded()
+    chosen = cs.select_portfolio(df, cands, res, 6, objective="emax", min_unique=1)
+    assert chosen[0] == int(np.argmax(res.payouts.mean(axis=0)))
+    best = [res.payouts[:, chosen[:k]].max(axis=1).mean() for k in range(1, len(chosen) + 1)]
+    assert all(b2 >= b1 - 1e-9 for b1, b2 in zip(best, best[1:]))
+    roi_pick = cs.select_portfolio(df, cands, res, 6, objective="roi", min_unique=1)
+    assert best[-1] >= res.payouts[:, roi_pick].max(axis=1).mean() - 1e-6
+
+
+def test_auto_objective_by_contest_size():
+    import argparse
+    from dfs_engine.cli import _objective
+    a = argparse.Namespace(objective="auto")
+    assert _objective(a, 150_000) == "top1" and _objective(a, 500) == "roi"
+    assert _objective(argparse.Namespace(objective="emax"), 150_000) == "emax"

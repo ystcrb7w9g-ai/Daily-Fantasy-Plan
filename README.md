@@ -207,6 +207,28 @@ What it does:
    - `--objective top1` makes each pick maximize the share of simulations
      where *some* entry finishes top 1%. That favors lineups that win in
      different outcomes, so it's better for diversified mass-multi-entry.
+   - `--objective emax` makes each pick maximize the expected payout of
+     the portfolio's *best* entry. This is the objective from Bergman et
+     al.: entries should play off each other.
+   - `--objective auto` is the default: `top1` for contests of 10,000+
+     entries, `roi` below that.
+
+     Why: if our projections were exactly right, `roi` would be optimal,
+     because payouts add up. They aren't right, so I graded 20-lineup
+     150k-entry portfolios on four sets of "wrong-projection" worlds,
+     where every player's true mean was off from our projection by about
+     25%:
+
+     | objective | ROI, same model | ROI, wrong projections (avg) | P(any top 1%), wrong projections |
+     |---|---|---|---|
+     | roi | +165% | +191% (range +130 to +317) | 33.9% |
+     | top1 | +151% | +189% (range +155 to +231) | **37.0%** |
+     | emax | +141% | +184% (range +108 to +303) | 33.4% |
+
+     All three come out at about the same ROI. `top1` gives more top-1%
+     finishes and swings less from world to world, so it's the default for
+     big GPPs. `emax` didn't beat it. The absolute ROIs are optimistic,
+     as always.
    - **Punt cap.** Any player salaried under `--cheap-salary` (default
      $4,000 Classic, $3,000 Showdown; `0` turns it off) appears in at most
      `--cheap-cap` (default 40%) of the lineups. One punt who scores zero
