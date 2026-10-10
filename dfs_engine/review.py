@@ -86,7 +86,7 @@ def actual_points(raw_list: list[pd.DataFrame]) -> pd.DataFrame:
 
 def grade_inputs(pool: pd.DataFrame, actual: pd.DataFrame) -> dict:
     """Projection and ownership accuracy (provided `own`, and `own_model` if present) on matched players."""
-    cols = ["name", "position", "proj"] + [c for c in ("own", "own_model") if c in pool]
+    cols = ["name", "position", "proj"] + [c for c in ("own", "own_model", "proj_public", "proj_model") if c in pool]
     p = pool[cols].assign(key=[_key(n, ps) for n, ps in zip(pool["name"], pool["position"])])
     m = p.merge(actual, on="key")
     m = m[m["proj"].notna() & m["fpts"].notna()]
@@ -94,6 +94,11 @@ def grade_inputs(pool: pd.DataFrame, actual: pd.DataFrame) -> dict:
            "proj_corr": round(float(np.corrcoef(m["proj"], m["fpts"])[0, 1]), 3),
            "proj_bias": round(float((m["proj"] - m["fpts"]).mean()), 2),
            "proj_bias_by_pos": {k: round(float((g["proj"] - g["fpts"]).mean()), 2) for k, g in m.groupby("position")}}
+    for col in ("proj_public", "proj_model"):  # provided vs our own projection, when the pool carries both
+        if col in m and m[col].notna().any():
+            x = m[m[col].notna()]
+            out[f"{col}_corr"] = round(float(np.corrcoef(x[col], x["fpts"])[0, 1]), 3)
+            out[f"{col}_mae"] = round(float((x[col] - x["fpts"]).abs().mean()), 3)
     for col in ("own", "own_model"):
         if col in m and m[col].notna().any():
             o = pd.to_numeric(m[col], errors="coerce").fillna(0)

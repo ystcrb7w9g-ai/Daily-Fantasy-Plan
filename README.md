@@ -98,7 +98,7 @@ pip install -r requirements.txt
 
 | when | command | what you need |
 |---|---|---|
-| Thu–Sat | `dk-pool --entries DKEntries.csv --projections goingfor2.tsv --estimate-own --week N` | entry file, GoingFor2 paste, (DFF) |
+| Thu–Sat | `dk-pool --entries DKEntries.csv --projections goingfor2.tsv --estimate-own --week N --proj-blend 0.25 --dst-blend 0.5` | entry file, GoingFor2 paste, (DFF) |
 | Thu–Sat | `dk-contests`, then `dk-run --pool ... --flex-stacks --qb-stack 2 --bring-back 1 --max-per-game 4 --max-per-team 3 --max-vs-dst 0 --max-game-stack-share 0.5` | the pool above |
 | Sun ~11:30 ET | re-run `dk-pool --refresh-nflverse` + `dk-run` if inactives change things | |
 | Sun ~3:45 ET | `dk-late-swap --entries DKEntries_live.csv --standings <live export>` | live entry file + standings export |
@@ -497,6 +497,74 @@ The ranges are about right on average. Tight ends beat their 85th
 percentile 23% of the time in Weeks 1–3 but only 8% in Week 4, so the
 TE ceilings stay as they are.
 
+### Our own projections (`proj-fit`, `dk-pool --proj-blend`)
+
+A thorough review of 2026 Weeks 1–4 (664 projected player-weeks scored
+against actual DK points) and five seasons of nflverse games led to a
+projection model built only from free data. What the review found:
+
+- **Vegas implied team totals are unbiased and well calibrated** (2,848
+  team-games, 2021–26). Actual scoring ran +0.25 pts over implied
+  overall, and within 1 pt of implied in every bucket from 16 to 30.
+  A team's score still swings ±9 pts around its implied total.
+- **Each implied point is worth ~2.7 DK points to the offense.** Team
+  QB+RB+WR+TE output ≈ 26.3 + 2.73 × implied total. The split barely
+  moves with the spread: QB ~20%, RB ~26%, WR ~39%, TE ~14–15%.
+  Favorites lean a little more QB/RB.
+- **The public projections are unbiased and well spread overall.** They
+  averaged 0.3 pts high, with a slope of actual on projection of 0.97.
+  Their misses don't correlate with Vegas totals, spread, salary, last
+  week's points, season averages or ownership (all |r| < 0.05), and
+  re-fitting them per position made held-out error worse. Simple
+  corrections won't beat them.
+- **Their weak spots:**
+  - QBs: correlation 0.25. One projected point is worth only 0.73
+    actual points, so they spread QBs too far apart.
+  - DSTs: correlation 0.11, with 0.39 actual pts per projected pt.
+  - The $5.5–7k tier: correlation 0.25.
+- **In Week 4 the sources were close:** DFF 5.71 average error, GoingFor2
+  5.75, props 5.93 (+0.85 bias), DK season averages 6.27. Averaging the
+  three didn't beat any single one.
+
+**The model (`dfs_engine/projections.py`).** For QB/RB/WR/TE it runs a
+ridge regression per position. All features come from games before the
+week being projected:
+
+- season-to-date averages, shrunk toward last season;
+- last-3-game averages of DK points, targets and carries;
+- QB pass attempts;
+- the player's share of team DK points × the Vegas-implied team output;
+- implied total and spread.
+
+DSTs use the opponent's implied total, own spread, season sack rate and
+home field. Opponent-defense adjustments added nothing, so they're left
+out.
+
+| test | season average alone | our model | public projections |
+|---|---|---|---|
+| 2024–25 holdout, same-position correlation QB / RB / WR / TE | 0.46 / 0.65 / 0.59 / 0.56 | 0.50 / 0.67 / 0.60 / 0.58 | — |
+| 2026 Weeks 1–4, 556 skill player-weeks: avg error / same-position corr | | 6.04 / 0.412 | 5.97 / 0.438 |
+| same, **25% ours + 75% public** | | **5.93 / 0.446** (better in 3 weeks, tied 1) | |
+| 2026 DSTs (100): avg error / corr | | 3.85 / **0.24** | 3.91 / 0.11 |
+
+With no news and no paid data, ours comes within 0.07 pts of average
+error of the public projections, and it beat them in Week 4. Regressing
+actual points on both gives actual ≈ 0.75 × public + 0.26 × ours, so
+ours adds information the public numbers lack.
+`dk-pool --week N --proj-blend 0.25 --dst-blend 0.5` blends it in. The
+provided projection is kept as `proj_public` and ours as `proj_model`,
+and `review` grades both every week. Refit after each season with
+`proj-fit`, which downloads the nflverse files and prints a holdout
+check on the last season.
+
+**Where to get better next:** QB projections are weak everywhere (0.25
+for public and ours alike). The likely sources of improvement:
+
+- sportsbook props (pass yards and TD lines) once SportsGameOdds is
+  reachable;
+- snap shares and red-zone usage from nflverse play-by-play;
+- late news: inactives, and backups stepping into a starter's role.
+
 ### How a real field built its lineups (`field-structure`)
 
 ```bash
@@ -714,6 +782,7 @@ dfs_engine/
   lateswap.py     # late swap: live standings -> actual points/ownership/field -> re-optimized open slots
   field_model.py  # real-field lineup structure (stacks, bring-backs, DST conflicts) from standings
   review.py       # Monday review: contest scorecards, input grades, sim calibration, results log
+  projections.py  # our projections from nflverse usage + Vegas lines (skill ridge + DST model)
   cli.py          # command-line entry points
 tests/
   test_engine.py  # pytest-style tests
@@ -727,6 +796,7 @@ tests/
   test_lateswap.py   # live entry parsing, game clock, completions, end-to-end swap
   test_field_model.py # lineup structure features
   test_review.py     # scorecards, grading, calibration, results log
+  test_projections.py # no look-ahead features, fit/project ranking, blend, shipped model
   run_tests.py    # standalone runner (no pytest dependency)
 data/
   sample_classic_pool.csv
@@ -734,6 +804,7 @@ data/
   field_profile.json      # aggregate field behavior from three 2026 Millys
   correlation_profile.json # role-pair DK score correlations, 2021-25 regular seasons
   field_structure.json    # real Milly lineup structure by entrant group, Weeks 1-4
+  projection_model.json   # our projection model (fit on 2021-25 nflverse + Vegas)
 ```
 
 ## Testing

@@ -66,6 +66,7 @@ from . import dk
 from . import history
 from . import ownership
 from . import ownership_model as om
+from . import projections as pj
 from .portfolio import build_portfolio, exposure_report
 from .diagnostics import run_optimal_pct_chunk, leverage_report
 from . import sportsgameodds as sgo
@@ -394,6 +395,15 @@ def cmd_dk_pool(args: argparse.Namespace) -> None:
     if args.week:
         nfl = _nflverse(args)
         pool = om.prepare(pool, nfl, args.season, args.week)
+        if projections is not None and pj.MODEL_PATH.exists():
+            pool["proj_model"] = pj.project(pool, nfl, args.season, args.week, pj.load(str(pj.MODEL_PATH)))
+            n = int((pool["proj_model"].notna() & pool["proj"].notna()).sum())
+            print(f"Our nflverse + Vegas projection for {n} projected players (column proj_model)")
+            if args.proj_blend or args.dst_blend:
+                pool["proj_public"] = pool["proj"]
+                pool["proj"] = pj.blend(pool, pool["proj_model"], args.proj_blend, args.dst_blend)
+                print(f"  proj = {1 - args.proj_blend:.0%} provided + {args.proj_blend:.0%} ours (DST "
+                      f"{args.dst_blend:.0%} ours); the provided projection is kept as proj_public")
         filled = pool["team_total"].notna().sum()
         print(f"nflverse inputs for {args.season} Week {args.week}: lines for {filled}/{len(pool)} players, "
               f"last week's points for {pool['last_dk'].notna().sum()}, "
@@ -712,6 +722,33 @@ def cmd_dk_late_swap(args: argparse.Namespace) -> None:
         print(f"Wrote report to {args.report_out}")
 
 
+def cmd_proj_fit(args: argparse.Namespace) -> None:
+    seasons = list(range(args.first, args.last + 1))
+    print(f"Fetching nflverse weekly stats {seasons[0]}-{seasons[-1]} into {args.nflverse} (cached) ...")
+    weekly = pd.concat([pd.read_csv(p, low_memory=False) for p in pj.fetch_weekly(seasons, args.nflverse)],
+                       ignore_index=True)
+    games = om.load_nflverse(args.nflverse, args.last + 1).get("games")
+    if games is None:
+        games = pd.read_csv(om.fetch_nflverse(args.last + 1, args.nflverse)["games"])
+    skill, dst = pj.training_rows(weekly, games)
+    hold = args.last
+    test = pj.fit(skill[skill["season"] < hold], dst[dst["season"] < hold], lam=args.l2)
+    print(f"Holdout check (fit through {hold - 1}, scored on {hold}):")
+    for pos in pj.SKILL:
+        g = skill[(skill["season"] == hold) & (skill["position"] == pos)]
+        pr = pj._apply(test["positions"][pos], g[pj.FEATURES].to_numpy(float))
+        base = g["stab_dk"].to_numpy(float)
+        print(f"  {pos}: corr {np.corrcoef(pr, g['dk'])[0, 1]:.3f} (season average alone "
+              f"{np.corrcoef(base, g['dk'])[0, 1]:.3f}), MAE {np.abs(pr - g['dk']).mean():.2f}, n={len(g)}")
+    g = dst[dst["season"] == hold]
+    pr = pj._apply(test["dst"], g[pj.DST_FEATURES].to_numpy(float))
+    print(f"  DST: corr {np.corrcoef(pr, g['dst'])[0, 1]:.3f}, MAE {np.abs(pr - g['dst']).mean():.2f}, n={len(g)}")
+    model = pj.fit(skill, dst, lam=args.l2)
+    pj.save(model, args.out)
+    print(f"Saved model fit on {seasons[0]}-{seasons[-1]} ({len(skill):,} player-weeks, {len(dst):,} DST-weeks) "
+          f"to {args.out}")
+
+
 def cmd_field_structure(args: argparse.Namespace) -> None:
     from . import field_model as fm
     nfl = _nflverse(args)
@@ -795,6 +832,9 @@ def cmd_review(args: argparse.Namespace) -> None:
         print(f"=== Inputs ({g['matched']} players matched) ===")
         print(f"projections vs actual points: corr {g['proj_corr']:.2f}, bias {g['proj_bias']:+.2f} pts "
               f"(" + ", ".join(f"{k} {v:+.1f}" for k, v in g["proj_bias_by_pos"].items()) + ")")
+        for col, label in (("proj_public", "provided projection"), ("proj_model", "our projection model")):
+            if f"{col}_corr" in g:
+                print(f"{label}: corr {g[col + '_corr']:.2f}, mean abs error {g[col + '_mae']:.2f} pts")
         for col, label in (("own", "provided ownership"), ("own_model", "our ownership model")):
             if f"{col}_corr" in g:
                 print(f"{label}: corr {g[col + '_corr']:.2f}, mean abs error {g[col + '_mae']:.1%}")
@@ -1076,6 +1116,11 @@ def main() -> None:
     p_dkp.add_argument("--own-sharpen", type=float, default=1.0,
                        help="raise ownership to this power within each position (1.2 = chalkier); "
                             "use own-eval on past weeks to choose it")
+    p_dkp.add_argument("--proj-blend", type=float, default=0.0,
+                       help="with --week: blend this share of our nflverse+Vegas projection into proj for "
+                            "QB/RB/WR/TE (0.25 beat the public projections in 2026 Weeks 1-4)")
+    p_dkp.add_argument("--dst-blend", type=float, default=0.0,
+                       help="with --week: same for DSTs (ours ranked DSTs twice as well; 0.5 suggested)")
     p_dkp.add_argument("--lines", default=None,
                        help="Vegas lines CSV: team, spread, total (one team per game is enough)")
     _add_nflverse_args(p_dkp)
@@ -1180,6 +1225,14 @@ def main() -> None:
     _add_sim_args(p_rv)
     _add_nflverse_args(p_rv, week=False)
     p_rv.set_defaults(func=cmd_review, fmt="classic")
+
+    p_pf = sub.add_parser("proj-fit", help="Fit our nflverse + Vegas projection model on past seasons")
+    p_pf.add_argument("--first", type=int, default=2021)
+    p_pf.add_argument("--last", type=int, default=2025, help="last full season (also the holdout check)")
+    p_pf.add_argument("--l2", type=float, default=10.0)
+    p_pf.add_argument("--nflverse", default="data/nflverse")
+    p_pf.add_argument("--out", default=str(pj.MODEL_PATH))
+    p_pf.set_defaults(func=cmd_proj_fit)
 
     p_fs = sub.add_parser("field-structure", help="How a real contest's lineups were built (stacks, "
                                                   "bring-backs, DST conflicts), casual vs max-entry")
