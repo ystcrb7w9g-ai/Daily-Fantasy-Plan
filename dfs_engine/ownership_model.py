@@ -28,12 +28,13 @@ Features (z-scored within position unless noted):
                 (per 10 pts; not z-scored)
 
 Lines, box scores and injury reports come from nflverse (`fetch_nflverse`,
-`prepare`). Leave-one-week-out on 2026 Weeks 1-3 Millionaire Makers
-(`cross_validate`): corr 0.72 / mean abs error 3.2 pts with this model,
-vs 0.65 / 3.5 for the older log-linear fallback and 0.87 / 2.3 for
-GoingFor2's published projection. Blending ours into GoingFor2's made it
-slightly worse, so a published projection stays first choice; this is
-the fallback, and it gets better with each week of contest results.
+`prepare`). Leave-one-week-out on 2026 Weeks 1-4 Millionaire Makers
+(`cross_validate`): corr 0.73 / mean abs error 2.9 pts with this model,
+vs 0.88 / 2.05 for GoingFor2's published projection (the older
+log-linear fallback: 0.65 / 3.5 on Weeks 1-3). A 10% blend of ours into
+GoingFor2 averaged 0.883 / 2.03 but lost in Week 3, so a published
+projection stays first choice; this is the fallback and leverage scan,
+and it gets better with each week of contest results.
 (Optimal% from our sim was tried as a feature and added nothing.)
 """
 from __future__ import annotations

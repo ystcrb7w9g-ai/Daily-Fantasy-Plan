@@ -224,15 +224,16 @@ What it does:
    whole field's ownership, optimizer slice included, matches your `own`
    column.
 
-   The field also copies how real lineups are built. In 120k real
-   Milly lineups (`field-structure`, `data/field_structure.json`):
+   The field also copies how real lineups are built. In 160k real
+   Milly lineups from Weeks 1–4 (`field-structure`,
+   `data/field_structure.json`):
 
-   | share of lineups with... | real Millys | our old field | field now |
+   | share of lineups with... | real Millys (4-week avg) | our old field | field now |
    |---|---|---|---|
    | a bring-back (player from the QB's opponent) | 43% | 22–26% | 40–42% |
-   | the QB's own RB | 19% | 9–10% | 18–19% |
-   | an RB with his own DST | 14% | 7–9% | 13–14% |
-   | a player facing the lineup's own DST | 6.5% | 21–22% | 8% |
+   | the QB's own RB | 18% | 9–10% | 18–19% |
+   | an RB with his own DST | 16% | 7–9% | 13–14% |
+   | a player facing the lineup's own DST | 7% | 21–22% | 8% |
    | 4+ players from one game (not targeted) | 27–29% | 14–18% | 24–27% |
 
    Sampling boosts for those players are calibrated alongside ownership.
@@ -483,17 +484,18 @@ sim against reality**: how often real scores landed inside the sim's
 `outputs/results_log.csv`, which is git-ignored because it holds your
 results. Over a season that log gives real ROI by contest type.
 
-Weeks 1–3, using the sim's default ceilings:
+Weeks 1–3 with the sim's default ceilings; Week 4 with the pool we
+actually played:
 
-| | Week 1 | Week 2 | Week 3 | target |
-|---|---|---|---|---|
-| inside sim 10–90% | 78% | 86% | 79% | 80% |
-| above sim 85th pct | 24% | 11% | 19% | 15% |
-| pro edge in the Milly (top-1% rate, max-entry vs casual) | x1.9 | x2.8 | x2.2 | |
+| | Week 1 | Week 2 | Week 3 | Week 4 | target |
+|---|---|---|---|---|---|
+| inside sim 10–90% | 78% | 86% | 79% | 76% | 80% |
+| above sim 85th pct | 24% | 11% | 19% | 16% | 15% |
+| pro edge in the Milly (top-1% rate, max-entry vs casual) | x1.9 | x2.8 | x2.2 | x1.9 | |
 
 The ranges are about right on average. Tight ends beat their 85th
-percentile in 23% of cases, so their ceilings may be a bit low. That's
-worth re-checking as weeks accumulate.
+percentile 23% of the time in Weeks 1–3 but only 8% in Week 4, so the
+TE ceilings stay as they are.
 
 ### How a real field built its lineups (`field-structure`)
 
@@ -569,17 +571,22 @@ Lines, box scores and injury reports come from free
 beyond the realistic pool (≈2 QB, 2 RB, 4.2 WR, 1.6 TE and 2 DST per
 game, by projection) share a 4% tail.
 
-Leave-one-week-out on the 2026 Week 1–3 Millionaire Makers:
+Leave-one-week-out on the 2026 Week 1–4 Millionaire Makers. Each week
+is scored by a model fit on the other three. Week 4 was the first truly
+unseen week: the shipped model had been fit on Weeks 1–3 before its
+results existed.
 
-| | Week 1 | Week 2 | Week 3 | avg |
-|---|---|---|---|---|
-| **Ours** — correlation / avg error | 0.76 / 3.0 pts | 0.75 / 3.0 | 0.63 / 3.6 | 0.71 / 3.2 |
-| Old log-linear fallback | | | | 0.65 / 3.5 |
-| GoingFor2 (published) | 0.90 / 2.0 | 0.85 / 2.5 | 0.85 / 2.4 | 0.87 / 2.3 |
+| | Week 1 | Week 2 | Week 3 | Week 4 | avg |
+|---|---|---|---|---|---|
+| **Ours** — correlation / avg error | 0.77 / 3.0 pts | 0.75 / 3.1 | 0.63 / 3.5 | 0.79 / 1.9 | 0.73 / 2.9 |
+| GoingFor2 (published) | 0.90 / 2.0 | 0.85 / 2.5 | 0.85 / 2.4 | 0.92 / 1.3 | 0.88 / 2.05 |
+| 10% ours + 90% GoingFor2 | 0.90 / 2.0 | 0.86 / 2.4 | 0.85 / 2.4 | 0.92 / 1.3 | 0.883 / 2.03 |
+| Old log-linear fallback (Weeks 1–3) | | | | | 0.65 / 3.5 |
 
 GoingFor2 is still clearly better: it reacts to news, which a model
-built only on box scores can't. Mixing ours into it made it slightly worse, so
-keep GoingFor2's numbers as `own` and use ours:
+built only on box scores can't. The 10% mix is a hair better on
+average but lost in Week 3, so it stays off until it holds up every
+week. Keep GoingFor2's numbers as `own` and use ours:
 
 - as the fallback when no ownership projection is available;
 - as a leverage scan: the `own_model` column, plus the "we expect
@@ -726,7 +733,7 @@ data/
   sample_sgo_events.json  # SGO /events snapshot matching the sample pool
   field_profile.json      # aggregate field behavior from three 2026 Millys
   correlation_profile.json # role-pair DK score correlations, 2021-25 regular seasons
-  field_structure.json    # real Milly lineup structure by entrant group, Weeks 1-3
+  field_structure.json    # real Milly lineup structure by entrant group, Weeks 1-4
 ```
 
 ## Testing

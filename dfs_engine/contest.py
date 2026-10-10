@@ -339,7 +339,7 @@ def _sample_classic(df, logw, n, rng, stack_boost, min_salary, boosts=None):
     return np.concatenate([picked, flex[:, None]], axis=1), None, ok
 
 
-# Real-field lineup structure (2026 Week 1-3 Millionaire Makers, 120k lineups
+# Real-field lineup structure (2026 Week 1-4 Millionaire Makers, 160k lineups
 # mapped to teams with nflverse rosters; `field_model.structure_summary`):
 # share of lineups with at least one bring-back (player from the QB's
 # opponent), the QB's own RB, an RB on the DST's team, and an offensive
@@ -349,7 +349,7 @@ def _sample_classic(df, logw, n, rng, stack_boost, min_salary, boosts=None):
 # Measured on 12-13 game main slates, so applied only to slates with at
 # least STRUCTURE_MIN_GAMES games (on tiny slates you can hardly avoid
 # facing your own DST).
-DEFAULT_FIELD_STRUCTURE = {"bring_back": 0.428, "qb_rb": 0.187, "rb_dst": 0.142, "vs_dst": 0.065}
+DEFAULT_FIELD_STRUCTURE = {"bring_back": 0.431, "qb_rb": 0.183, "rb_dst": 0.158, "vs_dst": 0.070}
 FIELD_STRUCTURE_KEYS = tuple(DEFAULT_FIELD_STRUCTURE)
 STRUCTURE_MIN_GAMES = 6
 
