@@ -94,6 +94,17 @@ pip install -r requirements.txt
 
 ## Usage
 
+### Weekly workflow
+
+| when | command | what you need |
+|---|---|---|
+| Thu–Sat | `dk-pool --entries DKEntries.csv --projections goingfor2.tsv --estimate-own --week N` | entry file, GoingFor2 paste, (DFF) |
+| Thu–Sat | `dk-contests`, then `dk-run --pool ... --flex-stacks --qb-stack 2 --bring-back 1 --max-per-game 4 --max-per-team 3 --max-vs-dst 0 --max-game-stack-share 0.5` | the pool above |
+| Sun ~11:30 ET | re-run `dk-pool --refresh-nflverse` + `dk-run` if inactives change things | |
+| Sun ~3:45 ET | `dk-late-swap --entries DKEntries_live.csv --standings <live export>` | live entry file + standings export |
+| Mon | `review`, `field-structure`, `own-fit` with the new week | standings exports |
+
+
 ### Build a lineup portfolio
 
 ```bash
@@ -450,6 +461,40 @@ column next to the provided `own`, listing where the two disagree most.
 weeks, neither improved a published projection, so both are off by
 default.
 
+### Monday review (`review`)
+
+```bash
+python -m dfs_engine.cli review --standings contest-standings-*.zip --pool week5_pool.csv \
+    --entries DKEntries.csv --contests contests.csv --week 5
+```
+
+For every contest it prints a **scorecard**:
+
+- field size and the share of entries from max-entry accounts;
+- the **pro edge**: their top-1% rate divided by casual players' rate;
+- the winning, top-1%, top-20% and median scores;
+- your entries' finishes and approximate winnings.
+
+It then **grades the inputs** (projections, provided ownership,
+`own_model`) against actual points and %Drafted. Last, it checks **the
+sim against reality**: how often real scores landed inside the sim's
+10–90% range (should be 80%) and above its 85th percentile (should be
+15%), overall and by position. Each contest adds a row to
+`outputs/results_log.csv`, which is git-ignored because it holds your
+results. Over a season that log gives real ROI by contest type.
+
+Weeks 1–3, using the sim's default ceilings:
+
+| | Week 1 | Week 2 | Week 3 | target |
+|---|---|---|---|---|
+| inside sim 10–90% | 78% | 86% | 79% | 80% |
+| above sim 85th pct | 24% | 11% | 19% | 15% |
+| pro edge in the Milly (top-1% rate, max-entry vs casual) | x1.9 | x2.8 | x2.2 | |
+
+The ranges are about right on average. Tight ends beat their 85th
+percentile in 23% of cases, so their ceilings may be a bit low. That's
+worth re-checking as weeks accumulate.
+
 ### How a real field built its lineups (`field-structure`)
 
 ```bash
@@ -661,6 +706,7 @@ dfs_engine/
   ownership_model.py # our ownership projections: nflverse inputs, softmax fit, leave-one-week-out
   lateswap.py     # late swap: live standings -> actual points/ownership/field -> re-optimized open slots
   field_model.py  # real-field lineup structure (stacks, bring-backs, DST conflicts) from standings
+  review.py       # Monday review: contest scorecards, input grades, sim calibration, results log
   cli.py          # command-line entry points
 tests/
   test_engine.py  # pytest-style tests
@@ -673,6 +719,7 @@ tests/
   test_ownership_model.py # schedule lines, recency/injury inputs, softmax fit, CV
   test_lateswap.py   # live entry parsing, game clock, completions, end-to-end swap
   test_field_model.py # lineup structure features
+  test_review.py     # scorecards, grading, calibration, results log
   run_tests.py    # standalone runner (no pytest dependency)
 data/
   sample_classic_pool.csv

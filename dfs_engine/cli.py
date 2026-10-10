@@ -51,6 +51,8 @@ Pull SportsGameOdds lines/props and blend them into a pool:
 from __future__ import annotations
 
 import argparse
+import csv
+import os
 
 import numpy as np
 import pandas as pd
@@ -733,6 +735,86 @@ def cmd_field_structure(args: argparse.Namespace) -> None:
         print(f"Wrote {args.out}")
 
 
+def _our_entry_ids(paths: list[str]) -> dict[str, str]:
+    """Entry ID -> Contest ID from DK entry files or upload files (first columns: Entry ID, ..., Contest ID)."""
+    out = {}
+    for path in paths or []:
+        with open(path, encoding="utf-8-sig", newline="") as f:
+            for r in csv.reader(f):
+                if r and r[0].strip().isdigit() and len(r) > 2:
+                    out[r[0].strip()] = r[2].strip()
+    return out
+
+
+def cmd_review(args: argparse.Namespace) -> None:
+    from . import field_model as fm
+    from . import review as rv
+    raws = [history.read_standings(p) for p in args.standings]
+    ours = _our_entry_ids(args.entries)
+    contests = pd.read_csv(args.contests) if args.contests else None
+    if contests is None and args.entries:
+        try:
+            contests = dk.estimate_contests(dk.read_entry_file(args.entries[0]).entries)
+        except ValueError:
+            contests = None
+    payouts = {}
+    if contests is not None:
+        contests["contest_id"] = contests["contest_id"].astype(str)
+        payouts = {r["contest_id"]: _contest_payout(r) for r in contests.to_dict("records")}
+    nfl = _nflverse(args) if args.week else {}
+
+    print(f"=== Contests ({len(raws)}) ===")
+    rows = []
+    for path, raw in zip(args.standings, raws):
+        ids = set(raw["EntryId"].dropna().astype("int64").astype(str)) & set(ours)
+        cid = next((ours[i] for i in ids), None)
+        sc = rv.contest_scorecard(raw, ids, payouts.get(cid))
+        name = os.path.basename(path)
+        print(f"{name}: {sc['entries']:,} entries / {sc['accounts']:,} accounts; max-entry accounts hold "
+              f"{sc['max_entry_share']:.0%} of entries (top-1% rate {sc['max_entry_top1_rate']:.2%} vs casual "
+              f"{sc['casual_top1_rate']:.2%}: pro edge x{sc['pro_edge']}); winner {sc['winning_score']:.1f}, "
+              f"top 1% {sc['top1_score']:.1f}, top 20% {sc['top20_score']:.1f}, median {sc['median_score']:.1f}")
+        if sc["our_entries"]:
+            line = (f"  ours: {sc['our_entries']} entries, best rank {sc['our_best_rank']:,} "
+                    f"(top {sc['our_best_pct']:.2%}, {sc['our_best_points']:.1f} pts), median finish top "
+                    f"{sc['our_median_pct']:.0%}, {sc['our_top1']} in the top 1%")
+            if "our_profit" in sc:
+                line += f"; ~${sc['our_winnings']:,.2f} won on ${sc['our_fees']:,.2f} ({sc['our_profit']:+,.2f})"
+            print(line)
+        if nfl:
+            st = fm.measure_standings(raw, nfl["weekly"], nfl["games"], args.season, args.week, sample=20_000)["all"]
+            sc.update({"bring_back": round(1 - st["bring_back_0_1_2plus"][0], 4), "vs_own_dst": st["any_vs_own_dst"]})
+        rows.append({"season": args.season, "week": args.week, "contest_file": name, "contest_id": cid, **sc})
+
+    if args.pool:
+        df = load_player_pool(args.pool)
+        if nfl:
+            df = om.prepare(df, nfl, args.season, args.week)
+        actual = rv.actual_points(raws)
+        g = rv.grade_inputs(df, actual)
+        print(f"=== Inputs ({g['matched']} players matched) ===")
+        print(f"projections vs actual points: corr {g['proj_corr']:.2f}, bias {g['proj_bias']:+.2f} pts "
+              f"(" + ", ".join(f"{k} {v:+.1f}" for k, v in g["proj_bias_by_pos"].items()) + ")")
+        for col, label in (("own", "provided ownership"), ("own_model", "our ownership model")):
+            if f"{col}_corr" in g:
+                print(f"{label}: corr {g[col + '_corr']:.2f}, mean abs error {g[col + '_mae']:.1%}")
+        cal = rv.sim_calibration(df, actual, _simulate(df, args, args.trials, 0))
+        print(f"=== Simulation vs reality ({cal['players']} players) ===")
+        print(f"inside sim 10-90% range: {cal['inside_10_90']:.0%} (should be 80%); inside 25-75%: "
+              f"{cal['inside_25_75']:.0%} (50%); above sim 85th pct: {cal['above_p85']:.0%} (15%; by position "
+              + ", ".join(f"{k} {v:.0%}" for k, v in cal["above_p85_by_pos"].items()) + ")")
+        if cal["inside_10_90"] < 0.74:
+            print("  -> real outcomes are wider than the sim: raise --spread-scale / ceilings")
+        elif cal["inside_10_90"] > 0.86:
+            print("  -> the sim is wider than reality: lower --spread-scale / ceilings")
+        flat = {k: v for k, v in {**g, **cal}.items() if not isinstance(v, dict)}
+        for r in rows:
+            r.update({f"week_{k}": v for k, v in flat.items()})
+    if args.log:
+        rv.append_log(args.log, rows)
+        print(f"Appended {len(rows)} rows to {args.log}")
+
+
 def cmd_field_study(args: argparse.Namespace) -> None:
     team_of = None
     if args.entries:
@@ -1083,6 +1165,21 @@ def main() -> None:
     p_of.add_argument("--profile", default=str(ownership.PROFILE_PATH))
     _add_nflverse_args(p_of, week=False)
     p_of.set_defaults(func=cmd_own_fit)
+
+    p_rv = sub.add_parser("review", help="Monday review: contest scorecards, our results, input accuracy "
+                                         "and sim calibration vs what happened")
+    p_rv.add_argument("--standings", nargs="+", required=True, help="contest-standings CSV/ZIP export(s)")
+    p_rv.add_argument("--pool", default=None, help="the slate's pool CSV (proj, own, own_model...)")
+    p_rv.add_argument("--entries", nargs="*", default=None,
+                      help="your DKEntries / upload file(s), to find your entries in the standings")
+    p_rv.add_argument("--contests", default=None, help="contest table (dk-contests) to price your finishes")
+    p_rv.add_argument("--week", type=int, default=None, help="NFL week (adds field structure + sim profiles)")
+    p_rv.add_argument("--trials", type=int, default=5000)
+    p_rv.add_argument("--log", default="outputs/results_log.csv",
+                      help="results log to append to (git-ignored outputs/ folder)")
+    _add_sim_args(p_rv)
+    _add_nflverse_args(p_rv, week=False)
+    p_rv.set_defaults(func=cmd_review, fmt="classic")
 
     p_fs = sub.add_parser("field-structure", help="How a real contest's lineups were built (stacks, "
                                                   "bring-backs, DST conflicts), casual vs max-entry")

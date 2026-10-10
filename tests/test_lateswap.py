@@ -88,7 +88,7 @@ def test_late_swap_end_to_end_keeps_locked_and_beats_or_keeps():
     df = _pool()
     ours = _lineup(df)
     started = df["game_time"].to_numpy() == EARLY
-    truth = simulate_player_scores(df, n_trials=1, seed=4)[0]
+    truth = simulate_player_scores(df, n_trials=500, seed=4)[0]
     so_far = np.where(started, truth, 0.0)
     field = cs.generate_field(df, 400, seed=5)
     field_ids = [dk.assign_slots(list(np.flatnonzero(f)), df) for f in field]
