@@ -311,6 +311,53 @@ Then upload `dk_upload.csv` on DraftKings' Edit Entries page.
   and those without ownership count as 0%. `dk-run` warns if most
   ownership is missing, since the simulated field depends on it.
 
+### Late swap (`dk-late-swap`)
+
+Once the early games are under way, you know things the field didn't at
+first lock:
+
+- every locked player's points so far;
+- the field's *actual* ownership;
+- every opponent's lineup.
+
+`dk-late-swap` uses all three to re-optimize each entry's slots that
+haven't kicked off yet.
+
+```bash
+# ~10-15 min before the next lock: download your entries (DK > Upcoming >
+# Edit Entries > download) and the contest's standings export, then
+python -m dfs_engine.cli dk-late-swap --entries DKEntries_live.csv \
+    --pool week5_pool.csv --standings contest-standings-<milly>.zip \
+    --contests contests.csv --upload-out late_swap_upload.csv --report-out late_swap.csv
+```
+
+How it works:
+
+1. **Locked players are fixed.** DK marks them "(LOCKED)", and any
+   player whose game has kicked off is treated the same way. A locked
+   player scores his actual points plus, for games still in progress, a
+   simulated remainder. The game clock is estimated from kickoff time;
+   pass `--assume-final` once those games are over.
+2. **Options.** For each entry the command tries up to `--solves`
+   completions of the open slots (salary cap and slot eligibility
+   respected), plus the option of keeping the current lineup.
+3. **Scoring.** Every option is ranked against the contest's *real*
+   lineups from the standings export (your own entries excluded).
+   - A standings file is matched to its contest through your entry IDs.
+   - A file with none of your entries becomes the field for contests
+     without their own export.
+4. **Choice.** The best option by expected payout (`--objective top1`
+   for top-1% odds) wins. It must beat keeping the lineup by
+   `--min-gain` × the entry fee (default 2%), and two entries in one
+   contest never end up identical.
+5. **Missing players.** Rostered players missing from the pool are
+   scored at their DK season average and are never swapped *in*.
+
+The report shows each swap (out → in), points so far, and expected
+payout and top-1% odds before and after. Upload the file on DK's Edit
+Entries page. Locked players keep their IDs, so DK accepts the file as
+is.
+
 ### Learning from past contests (`field-study`)
 
 DraftKings' contest-standings export (contest page → Export Lineups, a
@@ -529,6 +576,7 @@ dfs_engine/
   sportsgameodds.py # SportsGameOdds fetch, game lines, prop -> DK baseline
   correlations.py # real player-pair correlations (nflverse) + fitting the sim to them
   ownership_model.py # our ownership projections: nflverse inputs, softmax fit, leave-one-week-out
+  lateswap.py     # late swap: live standings -> actual points/ownership/field -> re-optimized open slots
   cli.py          # command-line entry points
 tests/
   test_engine.py  # pytest-style tests
@@ -539,6 +587,7 @@ tests/
   test_history.py    # standings parsing, field profile, ownership estimator, spread fitting
   test_correlations.py # DK scoring from nflverse, measured vs simulated correlations
   test_ownership_model.py # schedule lines, recency/injury inputs, softmax fit, CV
+  test_lateswap.py   # live entry parsing, game clock, completions, end-to-end swap
   run_tests.py    # standalone runner (no pytest dependency)
 data/
   sample_classic_pool.csv

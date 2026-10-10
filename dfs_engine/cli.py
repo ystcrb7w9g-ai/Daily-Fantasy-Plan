@@ -605,6 +605,99 @@ def cmd_dk_run(args: argparse.Namespace) -> None:
         print(f"Wrote exposure report to {args.exposure_out}")
 
 
+def _now_eastern(text: str | None) -> pd.Timestamp:
+    if text:
+        return pd.Timestamp(text)
+    from zoneinfo import ZoneInfo
+    return pd.Timestamp.now(tz=ZoneInfo("America/New_York")).tz_localize(None)
+
+
+def cmd_dk_late_swap(args: argparse.Namespace) -> None:
+    from . import lateswap as ls
+    ef = dk.read_entry_file(args.entries)
+    df = load_player_pool(args.pool)
+    if "dk_id" not in df.columns or "game_time" not in df.columns or df["dk_id"].isna().any():
+        df, _ = dk.attach_dk_ids(df.drop(columns=["dk_id", "game_time"], errors="ignore"), ef)
+        df = df[df["dk_id"].notna()].reset_index(drop=True)
+    df["dk_id"] = pd.to_numeric(df["dk_id"]).astype("int64").astype(str)
+    now = _now_eastern(args.now)
+    raws = [history.read_standings(p) for p in args.standings]
+    current = ls.read_current_lineups(args.entries, ef.slots)
+    n0 = len(df)
+    df = ls.add_rostered_players(df, current, ef.players)
+    if len(df) > n0:
+        print(f"Added {len(df) - n0} rostered players missing from the pool (projected at DK FPPG): "
+              + ", ".join(df["name"].iloc[n0:].tolist()[:10]))
+    slate = ls.live_slate(df, raws, now, assume_final=args.assume_final)
+    print(f"As of {now:%a %I:%M %p} ET: {int(slate.started.sum())} of {len(df)} pool players have kicked off; "
+          f"{int((~slate.started).sum())} still open. {len(current)} entries.")
+    if slate.unknown_started:
+        print(f"  no points found for {len(slate.unknown_started)} started players (counted as 0 so far): "
+              + ", ".join(slate.unknown_started[:12]))
+
+    ours = set(current["entry_id"])
+    contest_of = dict(zip(current["entry_id"], current["contest_id"]))
+    fields, default = {}, None
+    for path, raw in zip(args.standings, raws):
+        W, off, n_real = ls.field_from_standings(raw, slate, ours, args.field_size, args.seed)
+        ids = set(raw["EntryId"].dropna().astype("int64").astype(str)) & ours
+        cids = {contest_of[i] for i in ids}
+        for c in cids:
+            fields[c] = (W, off)
+        if default is None or len(W) > len(default[0]):
+            default = (W, off)
+        print(f"  {path}: {n_real:,} opponent lineups ({len(W):,} used)"
+              + (f" for contest {', '.join(sorted(cids))}" if cids else " (no entries of ours; used as the "
+                 "field for contests without their own export)"))
+
+    contests = pd.read_csv(args.contests) if args.contests else dk.estimate_contests(ef.entries)
+    contests["contest_id"] = contests["contest_id"].astype(str)
+    payouts = {r["contest_id"]: _contest_payout(r) for r in contests.to_dict("records")}
+
+    gen = ls.live_scores(slate, _simulate(slate.pool, args, args.gen_trials, args.seed))
+    ev = ls.live_scores(slate, _simulate(slate.pool, args, args.eval_trials,
+                                         None if args.seed is None else args.seed + 1))
+    plans = ls.plan_entries(current, slate, gen, dk_players=ef.players, n_solves=args.solves, seed=args.seed)
+    results = ls.choose(plans, slate, ev, fields, default, payouts, objective=args.objective,
+                        min_gain=args.min_gain)
+
+    name_of = dict(zip(df["dk_id"], df["name"]))
+    name_of.update(dict(zip(ef.players["dk_id"], ef.players["name"])))
+    slot_ids, rows = {}, []
+    for p, r in zip(plans, results):
+        if r["choice"] is None:
+            print(f"  entry {p.entry_id}: no legal lineup found; left unchanged")
+            continue
+        ids = ls.upload_ids(p, r["choice"], slate.pool)
+        try:
+            dk.validate_upload_lineup(ids, ef.players)
+        except (ValueError, KeyError) as e:
+            print(f"  entry {p.entry_id}: swap failed DK checks ({e}); left unchanged")
+            continue
+        slot_ids[p.entry_id] = ids
+        outs = [name_of.get(a, a) for a in p.dk_ids if a not in ids]
+        ins = [name_of.get(b, b) for b in ids if b not in p.dk_ids]
+        rows.append({"entry_id": p.entry_id, "contest_id": p.contest_id, "changed": bool(outs),
+                     "out": "; ".join(o or "(empty)" for o in outs), "in": "; ".join(ins),
+                     "open_slots": r["open_slots"], "points_so_far": round(r["points_so_far"], 2),
+                     "exp_payout_before": round(r["cur_exp_payout"], 2), "exp_payout_after": round(r["new_exp_payout"], 2),
+                     "top1_before": round(r["cur_top1"], 4), "top1_after": round(r["new_top1"], 4),
+                     **dict(zip(dk.REPORT_SLOT_LABELS, [name_of.get(i, i) for i in ids]))})
+    rep = pd.DataFrame(rows)
+    n_written = dk.write_upload(ef, slot_ids, args.upload_out)
+    changed = rep[rep["changed"]] if len(rep) else rep
+    gain = (changed["exp_payout_after"] - changed["exp_payout_before"]).sum() if len(changed) else 0.0
+    print(f"Swapped {len(changed)} of {len(rep)} entries; simulated expected payout "
+          f"{'+' if gain >= 0 else ''}${gain:,.2f} vs keeping them.")
+    for r in changed.head(15).to_dict("records"):
+        print(f"  {r['entry_id']}: OUT {r['out']}  IN {r['in']}  "
+              f"(exp ${r['exp_payout_before']:.2f} -> ${r['exp_payout_after']:.2f})")
+    print(f"Wrote {n_written} lineups to {args.upload_out} (upload in DK's Edit Entries page)")
+    if args.report_out:
+        rep.to_csv(args.report_out, index=False)
+        print(f"Wrote report to {args.report_out}")
+
+
 def cmd_field_study(args: argparse.Namespace) -> None:
     team_of = None
     if args.entries:
@@ -862,6 +955,30 @@ def main() -> None:
     _add_nflverse_args(p_dkp)
     p_dkp.add_argument("--out", required=True)
     p_dkp.set_defaults(func=cmd_dk_pool)
+
+    p_ls = sub.add_parser("dk-late-swap", help="Re-optimize not-yet-started slots mid-slate "
+                                                "using the live contest standings")
+    p_ls.add_argument("--entries", required=True, help="DKEntries.csv downloaded mid-slate (current lineups)")
+    p_ls.add_argument("--pool", required=True, help="the slate's pool CSV (from dk-pool)")
+    p_ls.add_argument("--standings", nargs="+", required=True,
+                      help="live contest-standings export(s) (CSV/ZIP): points so far, actual "
+                           "%%Drafted and every opponent's lineup")
+    p_ls.add_argument("--contests", default=None, help="contest table from dk-contests (sizes/payouts)")
+    p_ls.add_argument("--now", default=None, help="'2026-10-11 16:00' (ET); default: current time")
+    p_ls.add_argument("--assume-final", action="store_true",
+                      help="treat every started game as finished (no simulated remainder)")
+    p_ls.add_argument("--objective", choices=["roi", "top1"], default="roi")
+    p_ls.add_argument("--solves", type=int, default=40, help="completions tried per entry")
+    p_ls.add_argument("--min-gain", type=float, default=0.02,
+                      help="swap only if expected payout rises by this share of the entry fee")
+    p_ls.add_argument("--gen-trials", type=int, default=2000)
+    p_ls.add_argument("--eval-trials", type=int, default=3000)
+    p_ls.add_argument("--field-size", type=int, default=30000, help="max opponent lineups used per contest")
+    p_ls.add_argument("--seed", type=int, default=None)
+    p_ls.add_argument("--upload-out", required=True)
+    p_ls.add_argument("--report-out", default=None)
+    _add_sim_args(p_ls)
+    p_ls.set_defaults(func=cmd_dk_late_swap, fmt="classic")
 
     p_dkc = sub.add_parser("dk-contests", help="Editable contest size/payout estimates for an entry file")
     p_dkc.add_argument("--entries", required=True)

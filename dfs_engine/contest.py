@@ -637,7 +637,12 @@ class FieldRanks:
 
 def rank_against_field(
     cand_w: np.ndarray, field_w: np.ndarray, scores: np.ndarray, batch: int = 256,
+    cand_offset: np.ndarray | None = None, field_offset: np.ndarray | None = None,
 ) -> FieldRanks:
+    """
+    `cand_offset` / `field_offset` add fixed points per lineup (e.g. late
+    swap: points already scored by rostered players outside the pool).
+    """
     n_sims = len(scores)
     n_cand, n_field = len(cand_w), len(field_w)
     n_above = np.zeros((n_sims, n_cand), dtype=np.int32)
@@ -647,8 +652,14 @@ def rank_against_field(
         sc = scores[s0:s0 + batch].astype(np.float32)
         b = len(sc)
         # Round so identical lineups tie exactly despite BLAS summation order.
-        cs = np.round(sc @ cand_w.T, 2).astype(np.float64)
-        fs = np.sort(np.round(sc @ field_w.T, 2).astype(np.float64), axis=1)
+        cs = sc @ cand_w.T
+        fs = sc @ field_w.T
+        if cand_offset is not None:
+            cs = cs + np.asarray(cand_offset, dtype=np.float32)[None, :]
+        if field_offset is not None:
+            fs = fs + np.asarray(field_offset, dtype=np.float32)[None, :]
+        cs = np.round(cs, 2).astype(np.float64)
+        fs = np.sort(np.round(fs, 2).astype(np.float64), axis=1)
         # One flattened searchsorted across the batch via per-row offsets.
         offset = (np.arange(b) * (fs.max() + cs.max() + 10.0))[:, None]
         flat = (fs + offset).ravel()
