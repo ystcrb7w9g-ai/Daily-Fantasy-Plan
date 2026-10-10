@@ -272,39 +272,114 @@ def _fill_last(cols, logw_rows, picked, used_salary, salary, min_salary, rng):
     return cols[_gumbel_top_k(lw, 1, rng)[:, 0]], ok
 
 
-def _sample_classic(df, logw, n, rng, stack_boost, min_salary):
-    """Ownership-weighted classic lineups: (ids (n, 9), captain None, ok mask)."""
+def _team_arrays(df):
+    """Team code, opponent's team code (-1 if not in pool) and position per player."""
+    codes, uniq = pd.factorize(df["team"].to_numpy())
+    code_of = {t: i for i, t in enumerate(uniq)}
+    opp = np.array([code_of.get(o, -1) for o in df["opp"].to_numpy()])
+    return codes, opp, df["position"].to_numpy()
+
+
+def _sample_classic(df, logw, n, rng, stack_boost, min_salary, boosts=None):
+    """
+    Ownership-weighted classic lineups: (ids (n, 9), captain None, ok mask).
+    `boosts` (see `FIELD_STRUCTURE_KEYS`) multiply the sampling weight of
+    players that create a structure: a bring-back (QB's opponent), the QB's
+    own RB, the DST's own RB, or a player facing the lineup's own DST.
+    """
     pos = df["position"].to_numpy()
-    team_codes = pd.factorize(df["team"].to_numpy())[0]
+    team_codes, opp_codes, _ = _team_arrays(df)
     salary = df["salary"].to_numpy(dtype=float)
     idx = {p: np.where(pos == p)[0] for p in CLASSIC_SLOTS}
+    lb = {k: np.log(v) for k, v in (boosts or {}).items()}
 
     qb = idx["QB"][_gumbel_top_k(np.broadcast_to(logw[idx["QB"]], (n, len(idx["QB"]))), 1, rng)[:, 0]]
     qb_team = team_codes[qb][:, None]
+    qb_opp = opp_codes[qb][:, None]
     log_boost = np.log(stack_boost)
 
-    def slot_logw(cols, boost):
+    def slot_logw(cols, boost, dst_team=None, rb=False):
         lw = np.broadcast_to(logw[cols], (n, len(cols))).copy()
+        t = team_codes[cols][None, :]
         if boost:  # QB's own pass catchers get a stacking boost
-            lw += np.where(team_codes[cols][None, :] == qb_team, log_boost, 0.0)
+            lw += np.where(t == qb_team, log_boost, 0.0)
+        if lb:
+            lw += np.where(t == qb_opp, lb.get("bring_back", 0.0), 0.0)
+            if dst_team is not None:
+                lw += np.where(opp_codes[cols][None, :] == dst_team, lb.get("vs_dst", 0.0), 0.0)
+            if rb is not False:
+                rbm = rb[None, :]
+                lw += np.where(rbm & (t == qb_team), lb.get("qb_rb", 0.0), 0.0)
+                if dst_team is not None:
+                    lw += np.where(rbm & (t == dst_team), lb.get("rb_dst", 0.0), 0.0)
         return lw
 
-    picks = [qb[:, None]]
-    for p, k in (("DST", 1), ("TE", 1), ("RB", 2), ("WR", 3)):
+    dst_cols = idx["DST"]
+    dst_lw = np.broadcast_to(logw[dst_cols], (n, len(dst_cols))).copy()
+    if lb:  # a DST facing the QB puts the QB against it
+        dst_lw += np.where(opp_codes[dst_cols][None, :] == qb_team, lb.get("vs_dst", 0.0), 0.0)
+    dst = dst_cols[_gumbel_top_k(dst_lw, 1, rng)[:, 0]]
+    dst_team = team_codes[dst][:, None]
+    picks = [qb[:, None], dst[:, None]]
+    for p, k in (("TE", 1), ("RB", 2), ("WR", 3)):
         cols = idx[p]
         if len(cols) < k:
             raise ValueError(f"Not enough {p} in pool to fill a lineup")
-        picks.append(cols[_gumbel_top_k(slot_logw(cols, p in ("WR", "TE")), k, rng)])
+        lw = slot_logw(cols, p in ("WR", "TE"), dst_team, rb=np.full(len(cols), p == "RB"))
+        picks.append(cols[_gumbel_top_k(lw, k, rng)])
     picked = np.concatenate(picks, axis=1)
 
     flex_cols = np.where(np.isin(pos, FLEX_POSITIONS))[0]
-    flex_lw = slot_logw(flex_cols, False)
+    flex_lw = slot_logw(flex_cols, False, dst_team, rb=pos[flex_cols] == "RB")
     flex_lw += np.where(
         (team_codes[flex_cols][None, :] == qb_team) & np.isin(pos[flex_cols], ("WR", "TE"))[None, :],
         log_boost, 0.0,
     )
     flex, ok = _fill_last(flex_cols, flex_lw, picked, salary[picked].sum(axis=1), salary, min_salary, rng)
     return np.concatenate([picked, flex[:, None]], axis=1), None, ok
+
+
+# Real-field lineup structure (2026 Week 1-3 Millionaire Makers, 120k lineups
+# mapped to teams with nflverse rosters; `field_model.structure_summary`):
+# share of lineups with at least one bring-back (player from the QB's
+# opponent), the QB's own RB, an RB on the DST's team, and an offensive
+# player facing the lineup's own DST. Our raw ownership sampler gave
+# 0.24 / 0.10 / 0.08 / 0.22 -- too few correlated builds, 3x too many
+# players against their own DST.
+# Measured on 12-13 game main slates, so applied only to slates with at
+# least STRUCTURE_MIN_GAMES games (on tiny slates you can hardly avoid
+# facing your own DST).
+DEFAULT_FIELD_STRUCTURE = {"bring_back": 0.428, "qb_rb": 0.187, "rb_dst": 0.142, "vs_dst": 0.065}
+FIELD_STRUCTURE_KEYS = tuple(DEFAULT_FIELD_STRUCTURE)
+STRUCTURE_MIN_GAMES = 6
+
+
+def structure_rates(field_w: np.ndarray, df: pd.DataFrame) -> dict[str, float]:
+    """Shares of classic field lineups with each `FIELD_STRUCTURE_KEYS` structure (+ 4+ from one game)."""
+    codes, opp, pos = _team_arrays(df)
+    n_t = codes.max() + 1
+    T = np.zeros((len(df), n_t), dtype=np.float32)
+    T[np.arange(len(df)), codes] = 1.0
+    O = np.zeros((n_t, n_t), dtype=np.float32)
+    for t, o in zip(codes, opp):
+        if o >= 0:
+            O[t, o] = 1.0
+    W = (field_w > 0).astype(np.float32)
+    by = lambda mask: W[:, mask] @ T[mask]  # noqa: E731  (n, teams) counts
+    qb = by(pos == "QB")
+    dst = by(pos == "DST")
+    off = by(pos != "DST")
+    rb = by(pos == "RB")
+    game = np.minimum(codes, np.where(opp >= 0, opp, codes))
+    G = np.zeros((len(df), game.max() + 1), dtype=np.float32)
+    G[np.arange(len(df)), game] = 1.0
+    return {
+        "bring_back": float(((qb @ O) * off).sum(axis=1).astype(bool).mean()),
+        "qb_rb": float((qb * rb).sum(axis=1).astype(bool).mean()),
+        "rb_dst": float((dst * rb).sum(axis=1).astype(bool).mean()),
+        "vs_dst": float(((dst @ O) * off).sum(axis=1).astype(bool).mean()),
+        "game_stack_4plus": float(((W @ G).max(axis=1) >= 4).mean()),
+    }
 
 
 def _sample_showdown(df, logw, n, rng, min_salary):
@@ -385,10 +460,18 @@ def generate_field(
     optimizer_share: float = 0.0,
     optimizer_solves: int = 500,
     optimizer_noise: float = DEFAULT_OPTIMIZER_NOISE,
+    structure: dict[str, float] | None = DEFAULT_FIELD_STRUCTURE,
 ) -> np.ndarray:
     """
     Simulated opponent lineups as a (n_field, n_players) weight matrix
     (same layout as `lineups_to_weights`).
+
+    - Classic `structure`: target shares of lineups with a bring-back, the
+      QB's own RB, an RB with his own DST, and a player facing the
+      lineup's own DST (`DEFAULT_FIELD_STRUCTURE`, measured in real
+      Millys). Sampling boosts for those players are calibrated alongside
+      ownership so the field matches them; None turns this off. Used on
+      slates of `STRUCTURE_MIN_GAMES`+ games.
 
     - `optimizer_share` of the field is an "optimizer slice": lineups that
       are MILP-optimal for the projections times lognormal noise
@@ -447,13 +530,27 @@ def generate_field(
         mix = np.asarray(stack_mix, dtype=float)
         mix = mix / mix.sum()
 
+    use_structure = (fmt == "classic" and structure is not None
+                     and df["team"].nunique() / 2 >= STRUCTURE_MIN_GAMES)
+    boosts = {k: 1.0 for k in structure} if use_structure else None
+
     def draw(logw, floor):
         if fmt == "classic":
-            return _sample_classic(df, logw, batch, rng, stack_boost, floor)
+            return _sample_classic(df, logw, batch, rng, stack_boost, floor, boosts)
         return _sample_showdown(df, logw, batch, rng, floor)
+
+    def update_boosts(sample_w):
+        rates = structure_rates(sample_w, df)
+        for k, target in structure.items():
+            boosts[k] = float(np.clip(boosts[k] * (target / max(rates[k], 1e-3)) ** 0.8, 0.02, 50.0))
 
     if stack_boost is None:
         stack_boost = _auto_stack_boost(df, own, mix, rng) if use_mix else 2.5
+
+    if use_structure:  # warm-start the structure boosts on raw draws
+        for _ in range(4):
+            ids, _, ok = draw(np.log(own), 0)
+            update_boosts(_ids_to_weights(ids[ok], None, n_players))
 
     if min_salary is None:
         min_salary = 49_000 if fmt == "classic" else 47_000
@@ -499,10 +596,13 @@ def generate_field(
     weights, last_ok = own.copy(), own.copy()
     for _ in range(calibration_rounds):
         try:
-            realized = (sample(weights, min(n_field, 5000)) > 0).mean(axis=0)
+            probe_w = sample(weights, min(n_field, 5000))
         except RuntimeError:
             weights = last_ok
             break
+        realized = (probe_w > 0).mean(axis=0)
+        if use_structure:
+            update_boosts(probe_w)
         last_ok = weights
         weights = weights * np.clip(own / np.maximum(realized, 1e-4), 0.2, 5.0) ** 0.8
         weights = np.clip(weights, own / 10.0, own * 10.0)

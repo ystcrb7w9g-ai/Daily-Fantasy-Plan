@@ -710,6 +710,29 @@ def cmd_dk_late_swap(args: argparse.Namespace) -> None:
         print(f"Wrote report to {args.report_out}")
 
 
+def cmd_field_structure(args: argparse.Namespace) -> None:
+    from . import field_model as fm
+    nfl = _nflverse(args)
+    res = fm.measure_standings(history.read_standings(args.standings), nfl["weekly"], nfl["games"],
+                               args.season, args.week, sample=args.sample)
+    print(f"{'group':10s} {'lineups':>8s}  QB stack 0/1/2/3+          bring-back 0/1/2+     "
+          f"max from 1 game <=3/4/5/6+     QB+RB  RB+DST  vs own DST")
+    for k, v in res.items():
+        print(f"{k:10s} {v['n']:>8,}  {v['qb_stack_0_1_2_3plus']}  {v['bring_back_0_1_2plus']}  "
+              f"{v['max_game_le3_4_5_6plus']}  {v['qb_with_own_rb']:.3f}  {v['rb_with_own_dst']:.3f}  "
+              f"{v['any_vs_own_dst']:.3f}")
+    a = res["all"]
+    print("Field generator targets (contest.DEFAULT_FIELD_STRUCTURE): "
+          + ", ".join(f"{k} {v}" for k, v in cs.DEFAULT_FIELD_STRUCTURE.items())
+          + f"; this contest: bring_back {1 - a['bring_back_0_1_2plus'][0]:.3f}, qb_rb {a['qb_with_own_rb']:.3f}, "
+          f"rb_dst {a['rb_with_own_dst']:.3f}, vs_dst {a['any_vs_own_dst']:.3f}")
+    if args.out:
+        import json
+        with open(args.out, "w", encoding="utf-8") as f:
+            json.dump(res, f, indent=1)
+        print(f"Wrote {args.out}")
+
+
 def cmd_field_study(args: argparse.Namespace) -> None:
     team_of = None
     if args.entries:
@@ -1053,6 +1076,15 @@ def main() -> None:
     p_of.add_argument("--profile", default=str(ownership.PROFILE_PATH))
     _add_nflverse_args(p_of, week=False)
     p_of.set_defaults(func=cmd_own_fit)
+
+    p_fs = sub.add_parser("field-structure", help="How a real contest's lineups were built (stacks, "
+                                                  "bring-backs, DST conflicts), casual vs max-entry")
+    p_fs.add_argument("--standings", required=True, help="contest-standings CSV/ZIP")
+    p_fs.add_argument("--week", type=int, required=True)
+    p_fs.add_argument("--sample", type=int, default=40_000, help="lineups sampled per group")
+    p_fs.add_argument("--out", default=None, help="optional JSON output")
+    _add_nflverse_args(p_fs, week=False)
+    p_fs.set_defaults(func=cmd_field_structure)
 
     p_cm = sub.add_parser("corr-measure", help="Measure real player-pair correlations from nflverse "
                                                "weekly stats and compare the simulation to them")

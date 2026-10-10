@@ -296,3 +296,18 @@ def test_auto_objective_by_contest_size():
     a = argparse.Namespace(objective="auto")
     assert _objective(a, 150_000) == "top1" and _objective(a, 500) == "roi"
     assert _objective(argparse.Namespace(objective="emax"), 150_000) == "emax"
+
+
+def test_field_structure_matches_real_milly_rates():
+    from test_ownership_model import _six_game_pool
+    df = _six_game_pool(0)
+    df["own"] = df["own"] / df["own"].sum() * 9
+    df["player_id"] = df.index
+    plain = cs.structure_rates(cs.generate_field(df, 3000, seed=3, structure=None), df)
+    field = cs.generate_field(df, 3000, seed=3)
+    r = cs.structure_rates(field, df)
+    for k, target in cs.DEFAULT_FIELD_STRUCTURE.items():
+        assert abs(r[k] - target) < abs(plain[k] - target) + 1e-9
+        assert abs(r[k] - target) < 0.06, (k, r[k], target)
+    own = np.clip(df["own"].to_numpy(), 1e-4, 0.95)
+    assert np.abs((field > 0).mean(axis=0) - own).mean() < 0.015

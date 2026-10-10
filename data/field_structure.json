@@ -1,0 +1,287 @@
+{
+ "source": "2026 Week 1-3 DK NFL Millionaire Maker standings, 40k lineups per group, players mapped to teams with nflverse rosters (field-structure command)",
+ "weeks": {
+  "week1": {
+   "all": {
+    "n": 39928,
+    "qb_stack_0_1_2_3plus": [
+     0.1919,
+     0.5359,
+     0.2559,
+     0.0163
+    ],
+    "bring_back_0_1_2plus": [
+     0.5617,
+     0.3574,
+     0.0809
+    ],
+    "max_game_le3_4_5_6plus": [
+     0.7082,
+     0.209,
+     0.0655,
+     0.0173
+    ],
+    "qb_with_own_rb": 0.1992,
+    "rb_with_own_dst": 0.1487,
+    "any_vs_own_dst": 0.0769
+   },
+   "casual": {
+    "n": 39832,
+    "qb_stack_0_1_2_3plus": [
+     0.3247,
+     0.5265,
+     0.1415,
+     0.0073
+    ],
+    "bring_back_0_1_2plus": [
+     0.6725,
+     0.2807,
+     0.0467
+    ],
+    "max_game_le3_4_5_6plus": [
+     0.8223,
+     0.1358,
+     0.0349,
+     0.007
+    ],
+    "qb_with_own_rb": 0.1776,
+    "rb_with_own_dst": 0.1472,
+    "any_vs_own_dst": 0.107
+   },
+   "max_entry": {
+    "n": 39985,
+    "qb_stack_0_1_2_3plus": [
+     0.1087,
+     0.5368,
+     0.3322,
+     0.0222
+    ],
+    "bring_back_0_1_2plus": [
+     0.5173,
+     0.4026,
+     0.0801
+    ],
+    "max_game_le3_4_5_6plus": [
+     0.6641,
+     0.2469,
+     0.0722,
+     0.0168
+    ],
+    "qb_with_own_rb": 0.1885,
+    "rb_with_own_dst": 0.14,
+    "any_vs_own_dst": 0.043
+   },
+   "old_sim_field": {
+    "n": 20000,
+    "qb_stack_0_1_2_3plus": [
+     0.2281,
+     0.5087,
+     0.2257,
+     0.0375
+    ],
+    "bring_back_0_1_2plus": [
+     0.7429,
+     0.2266,
+     0.0306
+    ],
+    "max_game_le3_4_5_6plus": [
+     0.8184,
+     0.1403,
+     0.0357,
+     0.0056
+    ],
+    "qb_with_own_rb": 0.1027,
+    "rb_with_own_dst": 0.0845,
+    "any_vs_own_dst": 0.2111
+   }
+  },
+  "week2": {
+   "all": {
+    "n": 39690,
+    "qb_stack_0_1_2_3plus": [
+     0.1673,
+     0.5612,
+     0.2566,
+     0.0148
+    ],
+    "bring_back_0_1_2plus": [
+     0.5631,
+     0.3715,
+     0.0654
+    ],
+    "max_game_le3_4_5_6plus": [
+     0.7294,
+     0.2103,
+     0.0521,
+     0.0083
+    ],
+    "qb_with_own_rb": 0.1885,
+    "rb_with_own_dst": 0.1395,
+    "any_vs_own_dst": 0.0584
+   },
+   "casual": {
+    "n": 39523,
+    "qb_stack_0_1_2_3plus": [
+     0.2408,
+     0.5805,
+     0.1702,
+     0.0085
+    ],
+    "bring_back_0_1_2plus": [
+     0.6497,
+     0.3043,
+     0.046
+    ],
+    "max_game_le3_4_5_6plus": [
+     0.8181,
+     0.1456,
+     0.0316,
+     0.0048
+    ],
+    "qb_with_own_rb": 0.1712,
+    "rb_with_own_dst": 0.1294,
+    "any_vs_own_dst": 0.0708
+   },
+   "max_entry": {
+    "n": 28907,
+    "qb_stack_0_1_2_3plus": [
+     0.0856,
+     0.5481,
+     0.344,
+     0.0223
+    ],
+    "bring_back_0_1_2plus": [
+     0.5095,
+     0.4242,
+     0.0662
+    ],
+    "max_game_le3_4_5_6plus": [
+     0.6665,
+     0.2664,
+     0.0589,
+     0.0082
+    ],
+    "qb_with_own_rb": 0.2009,
+    "rb_with_own_dst": 0.1476,
+    "any_vs_own_dst": 0.0375
+   },
+   "old_sim_field": {
+    "n": 20000,
+    "qb_stack_0_1_2_3plus": [
+     0.2107,
+     0.5201,
+     0.2265,
+     0.0427
+    ],
+    "bring_back_0_1_2plus": [
+     0.7741,
+     0.2057,
+     0.0202
+    ],
+    "max_game_le3_4_5_6plus": [
+     0.843,
+     0.1305,
+     0.0236,
+     0.0029
+    ],
+    "qb_with_own_rb": 0.1012,
+    "rb_with_own_dst": 0.0878,
+    "any_vs_own_dst": 0.2193
+   }
+  },
+  "week3": {
+   "all": {
+    "n": 39905,
+    "qb_stack_0_1_2_3plus": [
+     0.1724,
+     0.5179,
+     0.2905,
+     0.0192
+    ],
+    "bring_back_0_1_2plus": [
+     0.5904,
+     0.3424,
+     0.0673
+    ],
+    "max_game_le3_4_5_6plus": [
+     0.7257,
+     0.205,
+     0.0566,
+     0.0127
+    ],
+    "qb_with_own_rb": 0.1733,
+    "rb_with_own_dst": 0.1386,
+    "any_vs_own_dst": 0.0587
+   },
+   "casual": {
+    "n": 39823,
+    "qb_stack_0_1_2_3plus": [
+     0.26,
+     0.5347,
+     0.1946,
+     0.0107
+    ],
+    "bring_back_0_1_2plus": [
+     0.6733,
+     0.2785,
+     0.0483
+    ],
+    "max_game_le3_4_5_6plus": [
+     0.8104,
+     0.1456,
+     0.0373,
+     0.0067
+    ],
+    "qb_with_own_rb": 0.1724,
+    "rb_with_own_dst": 0.1322,
+    "any_vs_own_dst": 0.0761
+   },
+   "max_entry": {
+    "n": 27586,
+    "qb_stack_0_1_2_3plus": [
+     0.071,
+     0.4978,
+     0.3986,
+     0.0326
+    ],
+    "bring_back_0_1_2plus": [
+     0.5551,
+     0.377,
+     0.0679
+    ],
+    "max_game_le3_4_5_6plus": [
+     0.6747,
+     0.2431,
+     0.0673,
+     0.015
+    ],
+    "qb_with_own_rb": 0.1414,
+    "rb_with_own_dst": 0.1527,
+    "any_vs_own_dst": 0.028
+   },
+   "old_sim_field": {
+    "n": 20000,
+    "qb_stack_0_1_2_3plus": [
+     0.2281,
+     0.5075,
+     0.2425,
+     0.0219
+    ],
+    "bring_back_0_1_2plus": [
+     0.7843,
+     0.1956,
+     0.0202
+    ],
+    "max_game_le3_4_5_6plus": [
+     0.8649,
+     0.1162,
+     0.0173,
+     0.0017
+    ],
+    "qb_with_own_rb": 0.086,
+    "rb_with_own_dst": 0.0669,
+    "any_vs_own_dst": 0.2188
+   }
+  }
+ }
+}

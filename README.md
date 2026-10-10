@@ -194,6 +194,22 @@ What it does:
    (`--field-stack-mix`). The sampling weights are then calibrated so the
    whole field's ownership, optimizer slice included, matches your `own`
    column.
+
+   The field also copies how real lineups are built. In 120k real
+   Milly lineups (`field-structure`, `data/field_structure.json`):
+
+   | share of lineups with... | real Millys | our old field | field now |
+   |---|---|---|---|
+   | a bring-back (player from the QB's opponent) | 43% | 22–26% | 40–42% |
+   | the QB's own RB | 19% | 9–10% | 18–19% |
+   | an RB with his own DST | 14% | 7–9% | 13–14% |
+   | a player facing the lineup's own DST | 6.5% | 21–22% | 8% |
+   | 4+ players from one game (not targeted) | 27–29% | 14–18% | 24–27% |
+
+   Sampling boosts for those players are calibrated alongside ownership.
+   Matching ownership alone wasn't enough. The realistic field re-ranks
+   candidates: expected payouts correlate only 0.74 with the old field's,
+   and 8 of the top 20 candidates change. Applied on slates of 6+ games.
 3. **Contest sim.** Scores candidates and field on a *separate* set of
    simulations (`--eval-trials`), so lineups aren't graded on the outcomes
    they were built from. Each sampled field lineup stands for
@@ -416,6 +432,33 @@ column next to the provided `own`, listing where the two disagree most.
 weeks, neither improved a published projection, so both are off by
 default.
 
+### How a real field built its lineups (`field-structure`)
+
+```bash
+python -m dfs_engine.cli field-structure --standings contest-standings-<id>.zip --week 4
+```
+
+For every entrant group (all, casual players with 1–3 entries,
+150-entry max-entry accounts) it prints:
+
+- QB stack sizes and bring-backs;
+- the most players from one game;
+- QB + RB and RB + DST pairings;
+- players facing the lineup's own DST.
+
+Teams come from nflverse rosters. Week 1–3 Millys show how the pros
+build differently from the casual crowd:
+
+| | casual | max-entry |
+|---|---|---|
+| QB + 2 or more of his pass catchers | 15–21% | 35–43% |
+| at least one bring-back | 33–35% | 44–49% |
+| 4+ players from one game | 18–19% | 32–34% |
+| a player facing own DST | 7–11% | 3–4% |
+
+Run it on each week's export. If the "all" rates drift from
+`contest.DEFAULT_FIELD_STRUCTURE`, update the defaults.
+
 ### Scoring an ownership source (`own-eval`)
 
 ```bash
@@ -599,6 +642,7 @@ dfs_engine/
   correlations.py # real player-pair correlations (nflverse) + fitting the sim to them
   ownership_model.py # our ownership projections: nflverse inputs, softmax fit, leave-one-week-out
   lateswap.py     # late swap: live standings -> actual points/ownership/field -> re-optimized open slots
+  field_model.py  # real-field lineup structure (stacks, bring-backs, DST conflicts) from standings
   cli.py          # command-line entry points
 tests/
   test_engine.py  # pytest-style tests
@@ -610,12 +654,14 @@ tests/
   test_correlations.py # DK scoring from nflverse, measured vs simulated correlations
   test_ownership_model.py # schedule lines, recency/injury inputs, softmax fit, CV
   test_lateswap.py   # live entry parsing, game clock, completions, end-to-end swap
+  test_field_model.py # lineup structure features
   run_tests.py    # standalone runner (no pytest dependency)
 data/
   sample_classic_pool.csv
   sample_sgo_events.json  # SGO /events snapshot matching the sample pool
   field_profile.json      # aggregate field behavior from three 2026 Millys
   correlation_profile.json # role-pair DK score correlations, 2021-25 regular seasons
+  field_structure.json    # real Milly lineup structure by entrant group, Weeks 1-3
 ```
 
 ## Testing
