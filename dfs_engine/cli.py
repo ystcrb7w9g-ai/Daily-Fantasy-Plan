@@ -618,6 +618,8 @@ def cmd_dk_run(args: argparse.Namespace) -> None:
     if percentile_mask(df).any():
         print(f"  {int(percentile_mask(df).sum())} players carry their own p25-p99 percentiles "
               "(sims mapped onto them; correlations stay ours)")
+    if getattr(args, "td_model", False):
+        print("  TD model on: shared team TDs, knobs " + ", ".join(f"{k}={v}" for k, v in TD_MODEL.items()))
     _apply_exposure_flags(df, args)
     _exposure_note(df)
     min_exp, max_exp = cs.player_exposure_limits(df)
