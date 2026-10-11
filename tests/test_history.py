@@ -194,3 +194,15 @@ def test_estimate_ownership_falls_back_to_curves_without_model():
     df = _value_owned_pool()
     est = ownership.estimate_ownership(df, prof)
     assert abs(est[df["position"] == "QB"].sum() - 1.0) < 0.02
+
+
+def test_fill_ownership_keeps_given_and_fixes_position_totals():
+    pos = pd.Series(["TE", "TE", "TE", "TE", "QB", "QB"])
+    given = pd.Series([0.30, 0.20, np.nan, np.nan, np.nan, np.nan])
+    est = pd.Series([0.25, 0.25, 0.30, 0.10, 0.6, 0.2])
+    out = ownership.fill_ownership(given, est, pos)
+    totals = ownership.position_totals()
+    assert out[0] == 0.30 and out[1] == 0.20
+    assert abs(out[pos == "TE"].sum() - totals["TE"]) < 1e-9
+    assert abs(out[2] / out[3] - 3.0) < 1e-9          # the estimate's shape is kept
+    assert abs(out[pos == "QB"].sum() - totals["QB"]) < 1e-9

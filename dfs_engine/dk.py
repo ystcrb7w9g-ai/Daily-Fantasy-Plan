@@ -158,10 +158,11 @@ PROJECTION_ALIASES = {
     "team": ["team", "tm", "teamabbrev", "teamabbr"],
     "proj": ["proj", "projection", "projections", "projected", "projectedpoints", "projectedpts",
              "projpts", "projpoints", "projectedfpts", "projfpts", "fpts", "fantasypoints",
-             "points", "pts", "dkproj", "dkprojection", "dkfpts", "median", "fppg"],
+             "points", "pts", "dkproj", "dkprojection", "dkfpts", "median", "fppg", "ppgprojection"],
     "own": ["own", "ownership", "projown", "projectedown", "projectedownership", "blendedownership",
             "blendedown", "blended", "pown", "ownpct", "ownershippct", "ownershippercent", "dkown",
-            "dkownership"],
+            "dkownership", "ownershipprojection"],
+    "injury": ["injury", "injurystatus", "status", "inj"],
     "ceiling": ["ceiling", "ceil", "ceilingpts", "projceiling"],
     "salary": ["salary", "sal", "dksalary", "dksal"],
 }
@@ -180,6 +181,12 @@ def standardize_projection_columns(raw: pd.DataFrame) -> pd.DataFrame:
     headers it saw if it can't find a name and projection column.
     """
     lookup = {alias: std for std, aliases in PROJECTION_ALIASES.items() for alias in aliases}
+    heads = {_norm_header(c): c for c in raw.columns}
+    if "firstname" in heads and "lastname" in heads and not any(lookup.get(h) == "name" for h in heads):
+        # DailyFantasyFuel-style first/last name columns (DSTs carry the nickname in first_name)
+        first = raw[heads["firstname"]].fillna("").astype(str).str.strip()
+        last = raw[heads["lastname"]].fillna("").astype(str).str.strip()
+        raw = raw.assign(name=(first + " " + last).str.strip())
     rename, taken = {}, set()
     for col in raw.columns:
         std = lookup.get(_norm_header(col))
@@ -205,7 +212,13 @@ def standardize_projection_columns(raw: pd.DataFrame) -> pd.DataFrame:
             out[col] = pd.to_numeric(
                 out[col].astype(str).str.replace(r"[%$,\s]", "", regex=True), errors="coerce")
     out["name"] = out["name"].astype(str).str.strip()
+    if "injury" in out.columns:  # ruled out (Out / Doubtful / IR): no projection
+        out["injury"] = out["injury"].fillna("").astype(str).str.strip().str.upper()
+        out.loc[out["injury"].isin(OUT_STATUSES), "proj"] = np.nan
     return out[out["name"].ne("") & out["name"].ne("nan")]
+
+
+OUT_STATUSES = {"O", "OUT", "D", "DOUBTFUL", "IR", "PUP", "SUSP", "NA"}
 
 
 def read_projections(path: str) -> pd.DataFrame:

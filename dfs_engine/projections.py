@@ -235,8 +235,32 @@ def project(pool: pd.DataFrame, nfl: dict[str, pd.DataFrame], season: int, week:
     return out.clip(lower=0.0)
 
 
-def blend(pool: pd.DataFrame, ours: pd.Series, weight: float, dst_weight: float) -> pd.Series:
-    """proj <- (1 - w) * proj + w * ours where we have a projection (DSTs use `dst_weight`)."""
+VACATED_ROLE = 5.0  # DK pts/game of injured teammates' volume that marks a real role change
+
+
+def blend_mask(pool: pd.DataFrame, ours: pd.Series, max_gap: float | None = 0.5) -> pd.Series:
+    """
+    Players whose projection gets blended: we have one, and no sign of news
+    our box-score model can't see -- the player isn't absorbing an injured
+    teammate's real role (`vacated` >= VACATED_ROLE DK pts/game; ours ran
+    1.4 pts low on players with vacated volume in 2026)
+    and the two projections differ by at most `max_gap` (on 2026 Weeks 1-4
+    the public number was closer on big disagreements: MAE 4.25 vs 5.04).
+    """
+    use = ours.notna() & pool["proj"].notna()
+    if max_gap is not None:
+        use &= ((ours - pool["proj"]).abs() / pool["proj"].clip(lower=1.0)) <= max_gap
+    if "vacated" in pool:
+        # QBs excluded: an injured backup doesn't change the starter's role, and a
+        # backup taking over shows up as a big gap anyway
+        role = (pool["vacated"].fillna(0) >= VACATED_ROLE) & pool["position"].isin(["RB", "WR", "TE"])
+        use &= ~role
+    return use
+
+
+def blend(pool: pd.DataFrame, ours: pd.Series, weight: float, dst_weight: float,
+          max_gap: float | None = 0.5) -> pd.Series:
+    """proj <- (1 - w) * proj + w * ours where `blend_mask` allows it (DSTs use `dst_weight`)."""
     w = np.where(pool["position"] == "DST", dst_weight, weight)
-    has = ours.notna() & pool["proj"].notna()
+    has = blend_mask(pool, ours, max_gap)
     return pool["proj"].where(~has, (1 - w) * pool["proj"] + w * ours)

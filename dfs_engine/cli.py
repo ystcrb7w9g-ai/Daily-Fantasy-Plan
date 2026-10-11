@@ -402,8 +402,14 @@ def cmd_dk_pool(args: argparse.Namespace) -> None:
             if args.proj_blend or args.dst_blend:
                 pool["proj_public"] = pool["proj"]
                 pool["proj"] = pj.blend(pool, pool["proj_model"], args.proj_blend, args.dst_blend)
+                kept = (pool["proj_model"].notna() & pool["proj_public"].notna()
+                        & ~pj.blend_mask(pool, pool["proj_model"]))
                 print(f"  proj = {1 - args.proj_blend:.0%} provided + {args.proj_blend:.0%} ours (DST "
                       f"{args.dst_blend:.0%} ours); the provided projection is kept as proj_public")
+                if kept.any():
+                    print(f"  kept the provided projection for {int(kept.sum())} players with likely news our model "
+                          "can't see (injured teammate's volume, or >50% apart): "
+                          + ", ".join(pool.loc[kept, "name"].head(12)))
         filled = pool["team_total"].notna().sum()
         print(f"nflverse inputs for {args.season} Week {args.week}: lines for {filled}/{len(pool)} players, "
               f"last week's points for {pool['last_dk'].notna().sum()}, "
@@ -419,9 +425,12 @@ def cmd_dk_pool(args: argparse.Namespace) -> None:
             pool["own"] = blended.where(given.notna(), est if args.estimate_own else given)
             print(f"Blended ownership: {args.own_blend:.0%} estimate / {1 - args.own_blend:.0%} provided")
         else:
-            pool["own"] = given.where(given.notna(), est)
             n_est = int((given.isna() & pool["proj"].notna()).sum())
-            print(f"Estimated ownership for {n_est} projected players without one (our model)")
+            proj_ok = pool["proj"].notna()
+            pool["own"] = given
+            pool.loc[proj_ok, "own"] = ownership.fill_ownership(given[proj_ok], est[proj_ok], pool.loc[proj_ok, "position"])
+            print(f"Estimated ownership for {n_est} projected players without one (our model, scaled so each "
+                  "position adds up with the provided numbers)")
         pool.loc[pool["proj"].isna(), "own"] = np.nan
     if args.own_sharpen and args.own_sharpen != 1.0:
         given = pd.to_numeric(pool["own"], errors="coerce")

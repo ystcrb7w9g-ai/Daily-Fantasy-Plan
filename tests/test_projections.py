@@ -74,6 +74,12 @@ def test_fit_and_project_rank_usage_and_dst_matchups():
     b = pj.blend(pool, ours, 0.25, 0.5)
     assert abs(b[0] - (0.75 * 18.0 + 0.25 * ours[0])) < 1e-9 and abs(b[3] - (0.5 * 7.0 + 0.5 * ours[3])) < 1e-9
     assert pj.blend(pool, pd.Series(np.nan, index=pool.index), 0.25, 0.5).equals(pool["proj"])
+    # news guards: a player absorbing an injured teammate's volume, or a >50% disagreement, keeps the provided number
+    guarded = pool.assign(vacated=[2.0, 12.0, 0.0, 0.0])  # 2 pts/game is a depth player, not a role
+    far = ours.copy(); far[2] = pool.loc[2, "proj"] * 2.0
+    b2 = pj.blend(guarded, far, 0.25, 0.5)
+    assert b2[1] == guarded.loc[1, "proj"] and b2[2] == guarded.loc[2, "proj"]
+    assert abs(b2[0] - (0.75 * 18.0 + 0.25 * far[0])) < 1e-9
 
 
 def test_shipped_projection_model():

@@ -316,3 +316,16 @@ def test_cli_field_defaults_track_engine_defaults():
     out = subprocess.run([sys.executable, "-m", "dfs_engine.cli", "dk-run", "--help"], cwd=ROOT,
                          capture_output=True, text=True).stdout
     assert ",".join(map(str, cs.DEFAULT_STACK_MIX)) in out.replace("\n", "").replace(" ", "")
+
+
+def test_reads_dff_cheatsheet_layout():
+    import tempfile
+    path = os.path.join(tempfile.mkdtemp(), "DFF_NFL_cheatsheet.csv")
+    pd.DataFrame({"first_name": ["Jahmyr", "Texans", "Hurt"], "last_name": ["Gibbs", None, "Guy"],
+                  "position": ["RB", "DST", "WR"], "injury_status": [None, None, "O"], "team": ["DET", "HOU", "DET"],
+                  "salary": [9800, 3400, 4000], "ppg_projection": [28.6, 8.2, 9.0],
+                  "ownership_projection": [None, None, None]}).to_csv(path, index=False)
+    p = dk.read_projections(path)
+    assert list(p["name"]) == ["Jahmyr Gibbs", "Texans", "Hurt Guy"]
+    assert p.loc[0, "proj"] == 28.6 and p.loc[1, "position"] == "DST"
+    assert np.isnan(p.loc[2, "proj"])  # ruled out

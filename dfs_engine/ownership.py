@@ -129,6 +129,28 @@ def estimate_ownership(df: pd.DataFrame, profile: dict | None = None) -> pd.Seri
     return own.clip(upper=0.95)
 
 
+def fill_ownership(given: pd.Series, estimate: pd.Series, position: pd.Series,
+                   profile: dict | None = None) -> pd.Series:
+    """
+    Keep provided ownership where it exists and fill the gaps with
+    `estimate`, rescaled within each position so the position adds up to
+    its expected total (base slots + FLEX share). A partial ownership list
+    (only the chalk, say) plus a full-slate estimate would otherwise
+    double-count a position.
+    """
+    totals = position_totals(profile)
+    out = given.astype(float).copy()
+    for p in position.dropna().unique():
+        k = position == p
+        gap = k & given.isna()
+        if not gap.any():
+            continue
+        room = max(totals.get(p, 1.0) - given[k].fillna(0).sum(), 0.0)
+        est = estimate[gap].clip(lower=0)
+        out[gap] = est / est.sum() * room if est.sum() > 0 else 0.0
+    return out.clip(upper=0.95)
+
+
 def check_ownership(df: pd.DataFrame, profile: dict | None = None) -> list[str]:
     """Human-readable warnings about a slate's ownership column vs real Milly fields."""
     prof = _profile(profile)
