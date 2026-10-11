@@ -826,6 +826,14 @@ def simulate_contest(
 # 4. Portfolio selection
 # ---------------------------------------------------------------------------
 
+def _share_count(share: float | None, n_lineups: int) -> int:
+    """Lineups a share cap allows. Any positive share allows at least one, like the player caps:
+    flooring 0.5 x 1 entry to zero would ban the structure outright in single-entry contests."""
+    if share is None or share <= 0:
+        return 0
+    return max(1, int(np.floor(share * n_lineups)))
+
+
 def select_portfolio(
     df: pd.DataFrame,
     candidates: list[LineupResult],
@@ -878,11 +886,11 @@ def select_portfolio(
     ev = result.payouts.mean(axis=0).astype(np.float64)
     is_big = np.array([max_game_stack(df, c) >= game_stack_size for c in candidates]) \
         if max_game_stack_share is not None else np.zeros(len(candidates), dtype=bool)
-    max_big = int(np.floor(max_game_stack_share * n_lineups)) if max_game_stack_share is not None else 0
+    max_big = _share_count(max_game_stack_share, n_lineups)
     n_big = 0
     is_pair = np.array([has_same_team_rbs(df, c) for c in candidates]) \
         if max_rb_pair_share is not None else np.zeros(len(candidates), dtype=bool)
-    max_pair = int(np.floor(max_rb_pair_share * n_lineups)) if max_rb_pair_share is not None else 0
+    max_pair = _share_count(max_rb_pair_share, n_lineups)
     n_pair = 0
     sets = [set(c.player_ids) for c in candidates]
     counts = np.zeros(n_players, dtype=int)

@@ -231,6 +231,16 @@ def test_flex_candidates_mix_structures_and_share_cap_limits_game_stacks():
     assert len(chosen) > 0
     assert sum(cs.max_game_stack(df, cands[i]) >= 4 for i in chosen) <= 3
 
+    # Single entry (a $20 Milly): a 0.5 share must still allow the best lineup when it's a game
+    # stack -- flooring 0.5 x 1 to zero used to ban every 4-man game stack there.
+    big = next(i for i, s in enumerate(sizes) if s >= 4)
+    pay = np.zeros((50, len(cands)), dtype=np.float32)
+    pay[:, big] = 100.0
+    rigged = cs.ContestResult(pay, res.metrics, pay > 0)
+    kw = dict(min_unique=1, tiered_caps=False, dst_cap=1.0, objective="roi")
+    assert cs.select_portfolio(df, cands, rigged, 1, max_game_stack_share=0.5, **kw) == [big]
+    assert big not in cs.select_portfolio(df, cands, rigged, 1, max_game_stack_share=0.0, **kw)
+
 
 # --- cheap-player cap / soft same-team RB rule ------------------------------
 
