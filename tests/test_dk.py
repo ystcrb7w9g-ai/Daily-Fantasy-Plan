@@ -329,3 +329,126 @@ def test_reads_dff_cheatsheet_layout():
     assert list(p["name"]) == ["Jahmyr Gibbs", "Texans", "Hurt Guy"]
     assert p.loc[0, "proj"] == 28.6 and p.loc[1, "position"] == "DST"
     assert np.isnan(p.loc[2, "proj"])  # ruled out
+
+
+# --- SaberSim exports -------------------------------------------------------
+
+PCT_MULT = {25: 0.5, 50: 0.9, 75: 1.4, 85: 1.7, 95: 2.3, 99: 3.1}
+
+
+def _sabersim_export(df, ef, path):
+    """SaberSim-layout DK projections export for the fixture slate."""
+    p = ef.players.set_index("name")
+    rows = []
+    for i, r in df.iterrows():
+        dk_name = DST_NAMES[r["team"]] if r["position"] == "DST" else r["name"]
+        pos = r["position"] if r["position"] in ("QB", "DST") else f"{r['position']}/FLEX"
+        row = {"DFS ID": p.loc[dk_name, "dk_id"], "Name": dk_name, "Pos": pos, "Team": r["team"], "Opp": r["opp"],
+               "Status": "", "Salary": r["salary"], "Actual": 0, "SS Proj": r["proj"], "Live Proj": None,
+               "My Proj": r["proj"], "Value": r["proj"] / r["salary"] * 1000, "My Own": r["own"] * 100,
+               "Adj Own": r["own"] * 105, "Min Exp": 0, "Max Exp": 100,
+               "Saber Team": r["team_total"] + 0.5, "Saber Total": r["game_total"] + 1.0, "dk_points": r["proj"]}
+        for q, m in PCT_MULT.items():
+            row[f"dk_{q}_percentile"] = r["proj"] * m
+        row["dk_std"] = r["proj"] * 0.7
+        rows.append(row)
+    out = pd.DataFrame(rows)
+    out.loc[0, "Name"] = "Renamed On SaberSim"         # matched by DFS ID anyway
+    out.loc[1, ["SS Proj", "My Proj"]] = 0.0            # SaberSim expects him inactive
+    out.loc[2, "Status"] = "O"
+    out.loc[3, ["Min Exp", "Max Exp"]] = [20, 60]
+    out.to_csv(path, index=False)
+    return out
+
+
+def test_reads_sabersim_export_into_pool():
+    df, path, d = _fixture()
+    ef = dk.read_entry_file(path)
+    ss = _sabersim_export(df, ef, os.path.join(d, "NFL_DK_Main.csv"))
+    p = dk.read_projections(os.path.join(d, "NFL_DK_Main.csv"))
+    assert {"dk_id", "p25", "p99", "min_exp", "max_exp", "team_total", "game_total"} <= set(p.columns)
+    assert p["position"].isin(["QB", "RB", "WR", "TE", "DST"]).all()
+    assert np.isnan(p.loc[1, "proj"]) and np.isnan(p.loc[2, "proj"]) and np.isnan(p.loc[1, "own"])
+    assert p.loc[3, "min_exp"] == 0.2 and p.loc[3, "max_exp"] == 0.6
+    assert p.loc[4, "ceiling"] == p.loc[4, "p85"]
+
+    pool, unmatched = dk.pool_from_entry_file(ef, p)
+    assert unmatched == []
+    by_id = pool.set_index("dk_id")
+    first = by_id.loc[str(ss.loc[0, "DFS ID"])]
+    assert first["proj"] == ss.loc[0, "My Proj"]       # renamed player still matched by id
+    assert pool["proj"].notna().sum() == len(df) - 2
+    team_tt = df.groupby("team")["team_total"].first() + 0.5
+    assert np.allclose(pool["team_total"], pool["team"].map(team_tt))
+    assert np.allclose(pool["spread"], pool["game_total"] - 2 * pool["team_total"])
+    sim_ready = load_player_pool_from(pool, d)
+    assert {"p25", "p99", "min_exp"} <= set(sim_ready.columns)
+
+
+def load_player_pool_from(pool, d):
+    path = os.path.join(d, "pool_from_ss.csv")
+    pool.to_csv(path, index=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return load_player_pool(path)
+
+
+def test_read_lineup_file_reads_ids_and_name_id_cells():
+    d = tempfile.mkdtemp()
+    a = os.path.join(d, "saber.csv")
+    with open(a, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(dk.ENTRY_COLUMNS + dk.CLASSIC_SLOTS)
+        w.writerow(["1", "C", "9", "$1"] + [str(10000 + i) for i in range(9)])
+        w.writerow(["2", "C", "9", "$1"] + [""] * 9)  # reservation: skipped
+    b = os.path.join(d, "DKEntries.csv")
+    with open(b, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(dk.ENTRY_COLUMNS + dk.CLASSIC_SLOTS + ["", "Instructions"])
+        w.writerow(["1", "C", "9", "$1"] + [f"Player {i} ({20000 + i})" for i in range(9)] + ["", "1. text"])
+    assert dk.read_lineup_file(a) == [[str(10000 + i) for i in range(9)]]
+    assert dk.read_lineup_file(b) == [[str(20000 + i) for i in range(9)]]
+
+
+def test_sabersim_pool_to_dk_run_with_extra_lineups_and_exposure_flags():
+    df, path, d = _fixture()
+    ef = dk.read_entry_file(path)
+    ss = os.path.join(d, "NFL_DK_Main.csv")
+    _sabersim_export(df, ef, ss)
+    pool_path = os.path.join(d, "pool.csv")
+    res = subprocess.run([sys.executable, "-W", "ignore", "-m", "dfs_engine.cli", "dk-pool", "--entries", path,
+                          "--projections", ss, "--out", pool_path], cwd=ROOT, capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr + res.stdout
+    pool = pd.read_csv(pool_path)
+    assert pool["p99"].notna().sum() == len(df) - 2 and pool["spread"].notna().all()
+    assert pool["min_exp"].max() == 0.2  # SaberSim's Min Exp carried into the pool ...
+    pool[["min_exp", "max_exp"]] = np.nan  # ... cleared so only the flags below apply
+    pool.to_csv(pool_path, index=False)
+
+    base = [sys.executable, "-W", "ignore", "-m", "dfs_engine.cli", "dk-run", "--pool", pool_path,
+            "--entries", path, "--candidates", "25", "--gen-trials", "200", "--eval-trials", "300",
+            "--holdout-trials", "200", "--field-size", "1500", "--min-unique", "1", "--seed", "3"]
+    first = os.path.join(d, "first.csv")
+    res = subprocess.run(base + ["--upload-out", first], cwd=ROOT, capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr + res.stdout
+    assert "carry their own p25-p99 percentiles" in res.stdout
+
+    proj = pool[pool["proj"].notna() & (pool["position"] != "DST")]
+    ban = proj.sort_values("proj").iloc[-1]["name"]                  # the best player: banned
+    must = proj[proj["name"] != ban].sort_values("proj").iloc[0]["name"]  # a scrub: forced in
+    second = os.path.join(d, "second.csv")
+    res = subprocess.run(base + ["--upload-out", second, "--extra-lineups", first,
+                                 "--max-exp", f"{ban}=0", "--min-exp", f"{must}=60%"],
+                         cwd=ROOT, capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr + res.stdout
+    assert "lineups from first.csv" in res.stdout and "Player exposure limits (2)" in res.stdout
+    assert "WARNING" not in res.stdout
+    ids = pool.set_index("name")["dk_id"].astype(str)
+    rows = list(csv.reader(open(second, encoding="utf-8")))[1:]
+    for r in rows:
+        dk.validate_upload_lineup(r[4:13], ef.players)
+        assert ids[ban] not in r[4:13]
+    by_contest = {}
+    for r in rows:
+        by_contest.setdefault(r[2], []).append(ids[must] in r[4:13])
+    assert all(sum(v) >= np.ceil(0.6 * len(v)) for v in by_contest.values())  # 1 of 1, 2 of 3

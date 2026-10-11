@@ -321,3 +321,75 @@ def test_field_structure_matches_real_milly_rates():
         assert abs(r[k] - target) < 0.06, (k, r[k], target)
     own = np.clip(df["own"].to_numpy(), 1e-4, 0.95)
     assert np.abs((field > 0).mean(axis=0) - own).mean() < 0.015
+
+
+# --- per-player exposure limits / imported lineups --------------------------
+
+def _counts(df, cands, chosen):
+    c = np.zeros(len(df), dtype=int)
+    for i in chosen:
+        c[cands[i].player_ids] += 1
+    return c
+
+
+def test_player_max_exposure_caps_and_bans():
+    df, cands, res = _graded(n_cand=60)
+    free = cs.select_portfolio(df, cands, res, 10, min_unique=1, tiered_caps=False, dst_cap=1.0)
+    top = int(np.argmax(_counts(df, cands, free)))
+    assert _counts(df, cands, free)[top] >= 4
+    capped, banned = df.copy(), df.copy()
+    capped["max_exp"] = np.nan
+    capped.loc[top, "max_exp"] = 0.2
+    banned["max_exp"] = np.nan
+    banned.loc[top, "max_exp"] = 0.0
+    kw = dict(min_unique=1, tiered_caps=False, dst_cap=1.0)
+    assert _counts(df, cands, cs.select_portfolio(capped, cands, res, 10, **kw))[top] <= 2
+    assert _counts(df, cands, cs.select_portfolio(banned, cands, res, 10, **kw))[top] == 0
+
+
+def test_player_min_exposure_is_met_when_lineups_exist():
+    df, cands, res = _graded(n_cand=80)
+    free = cs.select_portfolio(df, cands, res, 10, min_unique=1)
+    have = np.array([sum(i in c.player_ids for c in cands) for i in range(len(df))])
+    used = _counts(df, cands, free)
+    target = int(np.flatnonzero((used == 0) & (have >= 6) & (df["position"] != "DST").to_numpy())[0])
+    want = df.copy()
+    want["min_exp"] = np.nan
+    want.loc[target, "min_exp"] = 0.5  # 50% given as a fraction ...
+    assert _counts(df, cands, cs.select_portfolio(want, cands, res, 10, min_unique=1))[target] >= 5
+    want.loc[target, "min_exp"] = 30.0  # ... or as a percentage
+    want["min_exp"] = want["min_exp"].astype(float)
+    assert _counts(df, cands, cs.select_portfolio(want, cands, res, 10, min_unique=1))[target] >= 3
+
+
+def test_add_locked_candidates_builds_lineups_around_a_player():
+    df = _value_owned_pool()
+    gen = simulate_player_scores(df, n_trials=300, seed=51)
+    cands = cs.generate_candidates(df, gen, 10, seed=51)
+    cheap = int(df[df["position"] == "WR"]["proj"].idxmin())
+    before = len(cands)
+    added = cs.add_locked_candidates(df, gen, cands, [cheap], 6, seed=51)
+    assert added > 0 and len(cands) == before + added
+    assert all(cheap in c.player_ids for c in cands[before:])
+    none = cs.generate_candidates(df, gen, 10, seed=52, excluded_ids={cheap})
+    assert all(cheap not in c.player_ids for c in none)
+
+
+def test_candidates_from_ids_keeps_rule_abiding_lineups_only():
+    from dfs_engine.optimize import satisfies_stack_rules
+    df = _value_owned_pool()
+    df["dk_id"] = (70000 + df.index).astype(str)
+    gen = simulate_player_scores(df, n_trials=300, seed=61)
+    stack = StackRules(qb_stack=2, max_per_team=3)
+    good = cs.generate_candidates(df, gen, 6, seed=61, stack_rules=stack)
+    loose = cs.generate_candidates(df, gen, 30, seed=62)
+    bad = [c for c in loose if not satisfies_stack_rules(df, c.player_ids, stack)]
+    assert good and bad and all(satisfies_stack_rules(df, c.player_ids, stack) for c in good)
+    ids = lambda c: [df.at[i, "dk_id"] for i in c.player_ids]  # noqa: E731
+    out_player = [ids(good[0])[:-1] + ["99999"]]
+    short = [ids(good[0])[:8] + [ids(good[0])[0]]]  # a repeated player is not a roster
+    kept, n = cs.candidates_from_ids(df, [ids(c) for c in good] + [ids(bad[0])] + out_player + short,
+                                     stack_rules=[stack], existing=good[:1])
+    assert n["kept"] == len(good) - 1 and n["duplicate"] == 1
+    assert n["breaks_rules"] == 1 and n["not_in_pool"] == 1 and n["invalid"] == 1
+    assert [sorted(k.player_ids) for k in kept] == [sorted(c.player_ids) for c in good[1:]]

@@ -99,6 +99,7 @@ pip install -r requirements.txt
 | when | command | what you need |
 |---|---|---|
 | Thu–Sat | `dk-pool --entries DKEntries.csv --projections goingfor2.tsv --estimate-own --week N --proj-blend 0.25 --dst-blend 0.5` | entry file, GoingFor2 paste, (DFF) |
+| or, with SaberSim | `dk-pool --entries DKEntries.csv --projections NFL_..._DK_Main.csv --out pool.csv`, then `dk-run ... --extra-lineups <SaberSim entries export>` | SaberSim projections export (+ its lineups) |
 | Thu–Sat | `dk-contests`, then `dk-run --pool ... --flex-stacks --qb-stack 2 --bring-back 1 --max-per-game 4 --max-per-team 3 --max-vs-dst 0 --max-game-stack-share 0.5` | the pool above |
 | Sun ~11:30 ET | re-run `dk-pool --refresh-nflverse` + `dk-run` if inactives change things | |
 | Sun ~3:45 ET | `dk-late-swap --entries DKEntries_live.csv --standings <live export>` | live entry file + standings export |
@@ -378,6 +379,66 @@ Then upload `dk_upload.csv` on DraftKings' Edit Entries page.
 - **Missing players.** Players without a projection are dropped at load,
   and those without ownership count as 0%. `dk-run` warns if most
   ownership is missing, since the simulated field depends on it.
+
+### SaberSim exports (`dk-pool --projections`, `dk-run --extra-lineups`)
+
+`dk-pool` recognizes SaberSim's DK projections export (`DFS ID`, `SS Proj`,
+`My Proj`, `My Own`, `dk_25_percentile` ... columns) and matches it to the
+slate by DK ID:
+
+- `proj` = **My Proj** (SaberSim's number unless you edited it), `own` =
+  **My Own** (sums to 900%; `Adj Own`, ~945%, is ignored).
+- A projection of **0** is SaberSim saying the player won't play -- often
+  a questionable player it expects inactive -- so he's dropped, as are
+  `Status` O/D/IR players.
+- **Saber Team / Saber Total** replace Vegas as `team_total` / `game_total`
+  (spread derived from them); `--week` only fills teams they don't cover.
+- **dk_25 ... dk_99 percentiles** become `p25 p50 p75 p85 p95 p99`, and
+  `ceiling` = p85. The simulator maps each player's correlated draws onto
+  those quantiles at the same rank (`simulate.map_to_percentiles`): who
+  booms together is still our game/team/stack model, the shape is
+  SaberSim's. A p85-only fit can't carry their fat right tail -- on Week 5
+  their WR p99 was 3.3x projection vs our 2.7x, the same thinness our
+  Weeks 1-4 tail check found (real players beat our p95 9.9% of the time,
+  not 5%).
+- **Min Exp / Max Exp** become `min_exp` / `max_exp` (fractions).
+
+Per-player exposure works with any pool: `min_exp` / `max_exp` columns, or
+`dk-run --min-exp "Jahmyr Gibbs=30%" --max-exp "Brock Bowers=0"` (repeatable;
+flags win over columns). A player's own max replaces the default caps,
+max 0 bans him (and keeps him out of every candidate), and minimums are
+filled first, from extra candidates built around each min-exposure player.
+
+`dk-run --extra-lineups FILE` (repeatable) adds lineups from any DK-layout
+file -- SaberSim's entries export, an old upload, a DKEntries download --
+to the candidate pool. Each must be a valid roster of projected players
+that meets the stack rules; the contest sim then plays them only where they
+beat our own candidates, and the run prints how many it took per contest.
+
+```bash
+python -m dfs_engine.cli dk-pool --entries DKEntries.csv \
+    --projections NFL_2026-10-11-100pm_DK_Main.csv --out data/pool_saber.csv
+python -m dfs_engine.cli dk-run --pool data/pool_saber.csv --entries DKEntries.csv \
+    --contests contests.csv --extra-lineups entries_dk_nfl_2026-10-11_100pm_main.csv \
+    --flex-stacks --qb-stack 2 --bring-back 1 --max-per-game 4 --max-per-team 3 \
+    --max-vs-dst 0 --max-game-stack-share 0.5 --max-exposure 0.4 \
+    --eval-trials 50000 --holdout-trials 50000 --upload-out dk_upload.csv
+```
+
+Week 5 head-to-head (each portfolio graded in 40,000 fresh sims on SaberSim's
+inputs; note the grader is our own contest sim, so read it as a strong hint,
+not proof -- the Monday `review` is the real test):
+
+| P(any top-1%) | SaberSim's lineups | our engine on SaberSim's inputs | + SaberSim's lineups as candidates |
+|---|---|---|---|
+| mini-MAX (6) | 10.3% | 11.4% | 11.4% |
+| Quarter Jukebox (20) | 26.4% | 32.6% | 32.9% |
+| Dime (20) | 23.3% | 33.1% | 32.5% |
+
+SaberSim's single Milly lineup was the best one tested (3.0% top-1% vs our
+2.5%) -- and that exposed a bug: `--max-game-stack-share 0.5` floored
+0.5 x 1 entry to zero, banning every 4-man game stack in a single-entry
+contest. Fixed: any positive share allows at least one lineup.
 
 ### Late swap (`dk-late-swap`)
 
@@ -758,6 +819,9 @@ team_total, game_total, spread`.
   fraction.
 - `team_total` / `game_total` / `spread` come from the Vegas lines for
   that player's game and drive the correlated simulation.
+- Optional: `p25 p50 p75 p85 p95 p99` (the player's own outcome
+  percentiles; sims are mapped onto them), `min_exp` / `max_exp`
+  (per-player exposure limits, fractions or percentages).
 
 See `data/sample_classic_pool.csv` for a worked example (one game,
 13 players).
@@ -787,9 +851,9 @@ dfs_engine/
 tests/
   test_engine.py  # pytest-style tests
   test_sportsgameodds.py
-  test_sim_tools.py  # ceiling calibration, outcomes report, stacking rules
-  test_contest.py    # payouts, field sampler, contest sim, portfolio selection
-  test_dk.py         # entry-file parsing, matching, DK roster rules, upload, dk-run end to end
+  test_sim_tools.py  # ceiling calibration, provided percentiles, outcomes report, stacking rules
+  test_contest.py    # payouts, field sampler, contest sim, portfolio selection, exposure limits
+  test_dk.py         # entry-file parsing, matching, SaberSim exports, lineup files, upload, dk-run end to end
   test_history.py    # standings parsing, field profile, ownership estimator, spread fitting
   test_correlations.py # DK scoring from nflverse, measured vs simulated correlations
   test_ownership_model.py # schedule lines, recency/injury inputs, softmax fit, CV

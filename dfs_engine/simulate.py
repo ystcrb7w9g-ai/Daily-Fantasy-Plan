@@ -35,6 +35,12 @@ noise:
    (`fill_default_ceilings`, scaled by `spread_scale`), fitted so the
    simulated field's score spread matches real Millionaire Makers; pass
    `spread_scale=None` to leave them on the raw spread from steps 5-6.
+8. Provided percentiles: players with p25/p50/p75/p85/p95/p99 columns
+   (e.g. a SaberSim export) get their draws replaced by those quantiles
+   at the same within-player rank (`map_to_percentiles`). Ranks come from
+   steps 1-7, so who booms together is still our correlation model; the
+   shape -- median, ceiling, how far the top 1% reaches -- is the
+   source's. A one-point (p85) fit can't carry their fatter right tail.
 
 The output is a (n_trials, n_players) array of simulated fantasy points.
 """
@@ -76,6 +82,45 @@ def qb_variance_multiplier(salary: pd.Series) -> pd.Series:
 BASE_CEILING_MULT = {"QB": 1.55, "RB": 1.85, "WR": 1.90, "TE": 1.90, "DST": 2.00}
 DEFAULT_SPREAD_SCALE = 0.80
 RUSH_REF = 0.15  # average QB1 share of DK points from rushing (2021-25: 0.158)
+PERCENTILE_LEVELS = {"p25": 0.25, "p50": 0.50, "p75": 0.75, "p85": 0.85, "p95": 0.95, "p99": 0.99}
+
+
+def percentile_mask(df: pd.DataFrame) -> np.ndarray:
+    """Players with a full set of provided percentiles (and a positive projection)."""
+    cols = list(PERCENTILE_LEVELS)
+    if not set(cols) <= set(df.columns):
+        return np.zeros(len(df), dtype=bool)
+    q = df[cols].apply(pd.to_numeric, errors="coerce")
+    return (q.notna().all(axis=1) & (pd.to_numeric(df["proj"], errors="coerce") > 0)).to_numpy()
+
+
+def map_to_percentiles(scores: np.ndarray, df: pd.DataFrame, low_reach: float = 2.5) -> np.ndarray:
+    """
+    Replace each covered player's draws with his provided quantiles at the
+    same within-player rank. Between the given percentiles the quantile
+    function is linear; below p25 it falls to a floor (0, or -4 for DST)
+    no further than `low_reach` times the p25-p50 gap; above p99 it climbs
+    one more p95-p99 gap. Then rescaled so the mean stays on `proj`.
+    """
+    mask = percentile_mask(df)
+    if not mask.any():
+        return scores
+    out = scores.copy()
+    cols = np.flatnonzero(mask)
+    ranks = np.argsort(np.argsort(scores[:, cols], axis=0, kind="stable"), axis=0, kind="stable")
+    u = (ranks + 0.5) / len(scores)
+    knots = np.array([0.0, *PERCENTILE_LEVELS.values(), 1.0])
+    q = df[list(PERCENTILE_LEVELS)].to_numpy(dtype=float)[cols]
+    proj = df["proj"].to_numpy(dtype=float)[cols]
+    is_dst = (df["position"].to_numpy() == "DST")[cols]
+    for k, j in enumerate(cols):
+        p = q[k]
+        lo = max(-4.0 if is_dst[k] else 0.0, p[0] - low_reach * (p[1] - p[0]))
+        vals = np.maximum.accumulate(np.concatenate([[lo], p, [p[-1] + (p[-1] - p[-2])]]))
+        col = np.interp(u[:, k], knots, vals)
+        m = col.mean()
+        out[:, j] = col * (proj[k] / m) if m > 0.5 else col
+    return out
 
 
 def fill_default_ceilings(ceiling: np.ndarray, proj: np.ndarray, position: pd.Series,
@@ -106,6 +151,7 @@ def simulate_player_scores(
     calibrate_ceiling: bool = True,
     ceiling_pct: float = 0.85,
     spread_scale: float | None = DEFAULT_SPREAD_SCALE,
+    use_percentiles: bool = True,
 ) -> np.ndarray:
     """
     Simulate fantasy points for every player in `df` across `n_trials`
@@ -288,6 +334,8 @@ def simulate_player_scores(
         scores = proj[None, :] + shift[None, :] + scale[None, :] * (scores - proj[None, :])
 
     scores = np.clip(scores, 0.0, None)
+    if use_percentiles:
+        scores = map_to_percentiles(scores, df)
     return scores
 
 

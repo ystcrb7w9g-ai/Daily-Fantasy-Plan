@@ -97,6 +97,16 @@ def stack_constraint_rows(df: pd.DataFrame, rules: StackRules) -> tuple[list, li
     return A_rows, lb, ub
 
 
+def satisfies_stack_rules(df: pd.DataFrame, player_rows, rules: StackRules | None) -> bool:
+    """Does a finished lineup (pool row ids) meet `rules`? Same linear rows the solver uses."""
+    if rules is None or not rules.is_active():
+        return True
+    x = np.zeros(len(df))
+    x[list(player_rows)] = 1.0
+    A, lb, ub = stack_constraint_rows(df, rules)
+    return all(lo - 1e-9 <= float(row @ x) <= hi + 1e-9 for row, lo, hi in zip(A, lb, ub))
+
+
 @dataclass
 class LineupResult:
     player_ids: list[int]

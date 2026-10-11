@@ -180,6 +180,8 @@ def standardize_projection_columns(raw: pd.DataFrame) -> pd.DataFrame:
     columns accept strings like "18.5%", "$7,700". Raises with the
     headers it saw if it can't find a name and projection column.
     """
+    if is_sabersim(raw):
+        return standardize_sabersim(raw)
     lookup = {alias: std for std, aliases in PROJECTION_ALIASES.items() for alias in aliases}
     heads = {_norm_header(c): c for c in raw.columns}
     if "firstname" in heads and "lastname" in heads and not any(lookup.get(h) == "name" for h in heads):
@@ -204,7 +206,8 @@ def standardize_projection_columns(raw: pd.DataFrame) -> pd.DataFrame:
         elif "proj" not in taken and h.startswith("proj") and not re.search(r"sal|val|per|own", h):
             rename[col] = "proj"
             taken.add("proj")
-    out = raw.rename(columns=rename)[list(rename.values())].copy()
+    keep = [c for c in ["dk_id"] + PROVIDED_EXTRA_COLUMNS if c in raw.columns and c not in rename.values()]
+    out = raw.rename(columns=rename)[list(rename.values()) + keep].copy()  # already-standard extras pass through
     if not {"name", "proj"} <= set(out.columns):
         raise ValueError(f"Couldn't find player-name and projection columns in: {list(raw.columns)}")
     for col in ("proj", "own", "ceiling", "salary"):
@@ -219,6 +222,57 @@ def standardize_projection_columns(raw: pd.DataFrame) -> pd.DataFrame:
 
 
 OUT_STATUSES = {"O", "OUT", "D", "DOUBTFUL", "IR", "PUP", "SUSP", "NA"}
+
+# SaberSim's DK export: one row per slate player with its own projection and
+# ownership, implied team totals from its game sims, outcome percentiles and
+# per-player exposure limits. Percentiles become p25..p99 pool columns, which
+# the simulator maps each player's correlated draws onto.
+SABERSIM_PERCENTILES = (25, 50, 75, 85, 95, 99)
+PERCENTILE_COLUMNS = [f"p{q}" for q in SABERSIM_PERCENTILES]
+EXPOSURE_COLUMNS = ["min_exp", "max_exp"]
+PROVIDED_EXTRA_COLUMNS = ["team_total", "game_total"] + PERCENTILE_COLUMNS + EXPOSURE_COLUMNS
+
+
+def is_sabersim(raw: pd.DataFrame) -> bool:
+    heads = {_norm_header(c) for c in raw.columns}
+    return {"dfsid", "ssproj"} <= heads
+
+
+def standardize_sabersim(raw: pd.DataFrame) -> pd.DataFrame:
+    """
+    SaberSim export -> name / position / team / dk_id / proj / own / ceiling /
+    injury / team_total / game_total / p25..p99 / min_exp / max_exp.
+
+    `My Proj` and `My Own` are used (SaberSim's numbers unless you edited
+    them; My Own sums to 900%), not `Adj Own`. A projection of 0 is
+    SaberSim saying the player won't play -- often a questionable player
+    it expects to be inactive -- so it becomes no projection. Min/Max Exp
+    are percentages in the export and fractions here.
+    """
+    heads = {_norm_header(c): c for c in raw.columns}
+    def num(h):
+        return pd.to_numeric(raw[heads[h]], errors="coerce") if h in heads else pd.Series(np.nan, index=raw.index)
+    proj = num("myproj").where(num("myproj").notna(), num("ssproj"))
+    out = pd.DataFrame({
+        "name": raw[heads["name"]].astype(str).str.strip(),
+        "position": raw[heads["pos"]].astype(str).str.split("/").str[0].str.strip().str.upper(),
+        "team": raw[heads["team"]].map(normalize_abbr),
+        "dk_id": num("dfsid").astype("Int64").astype(str),
+        "salary": num("salary"),
+        "proj": proj.where(proj > 0),
+        "own": num("myown") if "myown" in heads else num("adjown"),
+        "injury": raw[heads["status"]].fillna("").astype(str).str.strip().str.upper() if "status" in heads else "",
+        "team_total": num("saberteam"), "game_total": num("sabertotal"),
+    })
+    for q in SABERSIM_PERCENTILES:
+        out[f"p{q}"] = num(f"dk{q}percentile")
+    out["ceiling"] = out["p85"]
+    out["min_exp"] = (num("minexp") / 100.0).clip(0, 1)
+    out["max_exp"] = (num("maxexp") / 100.0).clip(0, 1)
+    out.loc[out["injury"].isin(OUT_STATUSES), "proj"] = np.nan
+    gone = out["proj"].isna()
+    out.loc[gone, ["own", "ceiling"] + PERCENTILE_COLUMNS] = np.nan
+    return out[out["name"].ne("") & out["name"].ne("nan")].reset_index(drop=True)
 
 
 def read_projections(path: str) -> pd.DataFrame:
@@ -285,13 +339,44 @@ def pool_from_entry_file(ef: DKEntryFile, projections: pd.DataFrame | None = Non
     if projections is not None:
         proj = standardize_projection_columns(projections)
         idx = match_players(proj, p)
+        if "dk_id" in proj.columns:  # exact DK ID match where the source has one (SaberSim)
+            by_id = pd.Series(p.index, index=p["dk_id"].astype(str))
+            by_id = by_id[~by_id.index.duplicated()]
+            idx = proj["dk_id"].astype(str).map(by_id).astype(float).where(lambda s: s.notna(), idx)
         unmatched = proj.loc[idx.isna(), "name"].astype(str).tolist()
-        for col in ("proj", "own", "ceiling"):
+        hit = idx.notna()
+        rows = idx[hit].astype(int).to_numpy()
+        for col in ("proj", "own", "ceiling") + tuple(PROVIDED_EXTRA_COLUMNS):
             if col in proj.columns:
-                vals = pd.to_numeric(proj[col], errors="coerce")
-                hit = idx.notna()
-                pool.loc[idx[hit].astype(int).to_numpy(), col] = vals[hit].to_numpy()
+                if col not in pool.columns:
+                    pool[col] = np.nan
+                pool.loc[rows, col] = pd.to_numeric(proj[col], errors="coerce")[hit].to_numpy()
+        if {"team_total", "game_total"} <= set(proj.columns):  # source's own implied totals, team-wide
+            for col in ("team_total", "game_total"):
+                pool[col] = pool.groupby("team")[col].transform("first")
+            pool["spread"] = pool["game_total"] - 2 * pool["team_total"]  # favourite negative
     return pool, unmatched
+
+
+def read_lineup_file(path: str) -> list[list[str]]:
+    """
+    Classic lineups as DK player-id lists from any DK-layout file: an upload
+    file, a DKEntries download, or another optimizer's export (SaberSim's
+    entries file). The nine slot columns start at the first `QB` header;
+    cells may be ids or "Name (id)". Rows without nine ids are skipped.
+    """
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        rows = list(csv.reader(f))
+    if not rows or "QB" not in [h.strip() for h in rows[0]]:
+        raise ValueError(f"{path}: no QB column in the header -- expected DK lineup slots {CLASSIC_SLOTS}")
+    start = [h.strip() for h in rows[0]].index("QB")
+    out = []
+    for r in rows[1:]:
+        cells = (r + [""] * 9)[start:start + 9]
+        ids = [m.group(1) if (m := re.search(r"(\d{4,})\)?\s*$", c.strip())) else None for c in cells]
+        if all(ids):
+            out.append(ids)
+    return out
 
 
 def attach_dk_ids(pool: pd.DataFrame, ef: DKEntryFile) -> tuple[pd.DataFrame, list[str]]:

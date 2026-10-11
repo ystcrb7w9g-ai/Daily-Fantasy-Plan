@@ -36,6 +36,15 @@ DraftKings entry file -> pool -> optimized lineups -> upload file:
         --entries DKEntries.csv --contests contests.csv \\
         --qb-stack 2 --bring-back 1 --upload-out dk_upload.csv
 
+SaberSim export as the projection source, its lineups as extra candidates:
+
+    python -m dfs_engine.cli dk-pool --entries DKEntries.csv \\
+        --projections NFL_2026-10-11-100pm_DK_Main.csv --out data/pool_saber.csv
+    python -m dfs_engine.cli dk-run --pool data/pool_saber.csv \\
+        --entries DKEntries.csv --contests contests.csv \\
+        --extra-lineups entries_dk_nfl_2026-10-11_100pm_main.csv \\
+        --min-exp "Jahmyr Gibbs=30%" --max-exp "Brock Bowers=0" --upload-out dk_upload.csv
+
 Stacking rules (Classic) work on build / diagnose / outcomes / contest / dk-run:
 
     --qb-stack 2 --bring-back 1 --max-vs-dst 0 --max-per-team 4
@@ -58,7 +67,7 @@ import numpy as np
 import pandas as pd
 
 from .data import load_player_pool, validate_showdown_pool
-from .simulate import DEFAULT_SPREAD_SCALE, simulate_player_scores
+from .simulate import DEFAULT_SPREAD_SCALE, percentile_mask, simulate_player_scores
 from .optimize import ShowdownRules, StackRules
 from .outcomes import player_outcomes
 from . import contest as cs
@@ -176,6 +185,41 @@ def _add_portfolio_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--max-rb-pair-share", type=float, default=None,
                    help="max share of lineups with two RBs from one team (default 0.2 with "
                         "--showdown-rules soft, otherwise no cap)")
+
+
+def _add_exposure_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--min-exp", action="append", default=[], metavar="NAME=SHARE",
+                   help="a player's minimum share of each contest's lineups, e.g. 'Jahmyr Gibbs=0.3' "
+                        "(or 30%%); overrides a pool min_exp column (SaberSim's Min Exp). Repeatable")
+    p.add_argument("--max-exp", action="append", default=[], metavar="NAME=SHARE",
+                   help="a player's own maximum share, overriding the default caps; 0 bans him. Repeatable")
+
+
+def _apply_exposure_flags(df: pd.DataFrame, args: argparse.Namespace) -> None:
+    """--min-exp / --max-exp NAME=SHARE -> the pool's min_exp / max_exp columns (in place)."""
+    keys = df["name"].map(sgo.normalize_name)
+    for flag, col in (("min_exp", "min_exp"), ("max_exp", "max_exp")):
+        for item in getattr(args, flag, []) or []:
+            name, _, val = item.rpartition("=")
+            if not name:
+                raise SystemExit(f"--{flag.replace('_', '-')} expects NAME=SHARE, got {item!r}")
+            v = val.strip()
+            share = float(v.rstrip("%"))
+            if v.endswith("%") or share > 1:
+                share /= 100.0
+            hit = keys == sgo.normalize_name(name)
+            if not hit.any():
+                raise SystemExit(f"--{flag.replace('_', '-')}: no projected player named {name.strip()!r}")
+            if col not in df.columns:
+                df[col] = np.nan
+            df.loc[hit, col] = share
+
+
+def _exposure_note(df: pd.DataFrame) -> None:
+    lo, hi = cs.player_exposure_limits(df)
+    parts = [f"{n} {a:.0%}-{b:.0%}" for n, a, b in zip(df["name"], lo, hi) if a > 0 or b < 1]
+    if parts:
+        print(f"Player exposure limits ({len(parts)}): " + ", ".join(parts[:15]) + (" ..." if len(parts) > 15 else ""))
 
 
 def _portfolio_kwargs(args: argparse.Namespace) -> dict:
@@ -564,6 +608,13 @@ def cmd_dk_run(args: argparse.Namespace) -> None:
     contests["contest_id"] = contests["contest_id"].astype(str)
     total = int(contests["our_entries"].sum())
     print(f"{len(df)} projected players; {total} entries in {len(contests)} contests.")
+    if percentile_mask(df).any():
+        print(f"  {int(percentile_mask(df).sum())} players carry their own p25-p99 percentiles "
+              "(sims mapped onto them; correlations stay ours)")
+    _apply_exposure_flags(df, args)
+    _exposure_note(df)
+    min_exp, max_exp = cs.player_exposure_limits(df)
+    banned = set(np.flatnonzero(max_exp <= 0).tolist())
 
     seed = args.seed
     sub_seed = (lambda k: None) if seed is None else (lambda k: seed + k)
@@ -581,7 +632,23 @@ def cmd_dk_run(args: argparse.Namespace) -> None:
     n_cand = max(args.candidates, 3 * total)
     print(f"Generating {n_cand} candidate lineups...")
     candidates = cs.generate_candidates(df, gen_scores, n_cand, stack_rules=rules,
-                                        seed=seed, progress=True)
+                                        seed=seed, progress=True, excluded_ids=banned or None)
+    need_min = np.flatnonzero(min_exp > 0)
+    if len(need_min):
+        n_each = max(10, int(np.ceil(2 * min_exp[need_min].max() * total)))
+        added = cs.add_locked_candidates(df, gen_scores, candidates, need_min, n_each, stack_rules=rules,
+                                         seed=seed, excluded_ids=banned or None)
+        print(f"  +{added} candidates built around the {len(need_min)} min-exposure players")
+    extra_rows: dict[str, set[int]] = {}
+    for path in args.extra_lineups:
+        kept, n = cs.candidates_from_ids(df, dk.read_lineup_file(path), stack_rules=rules, existing=candidates)
+        n_banned = sum(bool(banned & set(lu.player_ids)) for lu in kept)
+        kept = [lu for lu in kept if not banned & set(lu.player_ids)]
+        extra_rows[os.path.basename(path)] = set(range(len(candidates), len(candidates) + len(kept)))
+        candidates += kept
+        print(f"  +{len(kept)} of {n['read']} lineups from {os.path.basename(path)} "
+              f"({n['breaks_rules']} break the stack rules, {n['not_in_pool']} use an unprojected/out player, "
+              f"{n_banned} use a banned player, {n['invalid']} invalid, {n['duplicate']} already in the pool)")
     cand_w = cs.lineups_to_weights(candidates, len(df))
     print("Ranking candidates against the field...")
     ranks = cs.rank_against_field(cand_w, field, eval_scores)
@@ -599,6 +666,12 @@ def cmd_dk_run(args: argparse.Namespace) -> None:
         chosen = _pick_for_contest(df, candidates, result, n, args, contest_size=payout.contest_size,
                                    exclude=taken if args.unique_across_contests else frozenset())
         taken.update(chosen)
+        for label, rows_from in extra_rows.items():
+            print(f"  {sum(c in rows_from for c in chosen)} of {len(chosen)} picks come from {label}")
+        for j in need_min:
+            got = sum(j in candidates[c].player_ids for c in chosen)
+            if got < np.ceil(min_exp[j] * n - 1e-9):
+                print(f"  WARNING: {df['name'].iloc[j]} in {got} of {n} lineups, short of min {min_exp[j]:.0%}")
         hold = cs.score_contest(hold_ranks, payout)
         summ = cs.portfolio_summary(hold, chosen, payout.entry_fee)
         roi_txt = f"ROI {summ['roi']:+.0%}" if payout.entry_fee > 0 else f"exp payout ${summ['exp_payout']:.2f}"
@@ -1192,6 +1265,11 @@ def main() -> None:
     p_dkr.add_argument("--report-out", default=None)
     p_dkr.add_argument("--exposure-out", default=None)
     p_dkr.add_argument("--fmt", default="classic", help=argparse.SUPPRESS)
+    p_dkr.add_argument("--extra-lineups", action="append", default=[], metavar="FILE",
+                       help="DK-format lineups added to the candidate pool (e.g. SaberSim's entries export, "
+                            "an old upload); kept if they meet the stack rules, played only where the contest "
+                            "sim prefers them. Repeatable")
+    _add_exposure_args(p_dkr)
     _add_sim_args(p_dkr)
     _add_stack_args(p_dkr)
     _add_field_optimizer_args(p_dkr)

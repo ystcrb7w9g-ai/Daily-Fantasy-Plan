@@ -40,6 +40,7 @@ import pandas as pd
 
 from .optimize import SALARY_CAP, LineupResult, ShowdownRules, StackRules, solve_classic, solve_showdown
 from .portfolio import default_exposure_cap
+from .simulate import percentile_mask
 
 CLASSIC_SLOTS = {"QB": 1, "RB": 2, "WR": 3, "TE": 1, "DST": 1}  # + 1 FLEX (RB/WR/TE)
 FLEX_POSITIONS = ("RB", "WR", "TE")
@@ -204,10 +205,13 @@ def generate_candidates(
     seed: int | None = None,
     max_solves: int | None = None,
     progress: bool = False,
+    locked_ids: set[int] | None = None,
+    excluded_ids: set[int] | None = None,
 ) -> list[LineupResult]:
     """
     Distinct lineups, each optimal for `(1 - m) * proj + m * trial` with a
-    random simulated trial and a random mix m ~ U(mix_range).
+    random simulated trial and a random mix m ~ U(mix_range). `locked_ids`
+    / `excluded_ids` (pool row ids) are forced in / kept out of every one.
 
     `stack_rules` may be a list of rule sets (see `flexible_stack_rules`):
     each solve then uses one of them in turn, so the pool spans stack
@@ -226,9 +230,11 @@ def generate_candidates(
         m = rng.uniform(*mix_range)
         pts = (1 - m) * proj + m * scores[rng.integers(len(scores))]
         if fmt == "classic":
-            lu = solve_classic(df, pts, stack_rules=rule_sets[solve_i % len(rule_sets)])
+            lu = solve_classic(df, pts, locked_ids=locked_ids, excluded_ids=excluded_ids,
+                               stack_rules=rule_sets[solve_i % len(rule_sets)])
         else:
-            lu = solve_showdown(df, pts, rules=rule_sets[solve_i % len(rule_sets)])
+            lu = solve_showdown(df, pts, locked_ids=locked_ids, excluded_ids=excluded_ids,
+                                rules=rule_sets[solve_i % len(rule_sets)])
         if lu is None:
             continue
         key = lineup_key(lu.player_ids, lu.captain_id)
@@ -241,6 +247,69 @@ def generate_candidates(
         if progress and len(out) % 250 == 0:
             print(f"  {len(out)}/{n_candidates} candidates ({solve_i + 1} solves)")
     return out
+
+
+def add_locked_candidates(
+    df: pd.DataFrame, scores: np.ndarray, candidates: list[LineupResult], player_rows, n_each: int,
+    fmt: str = "classic", stack_rules=None, seed: int | None = None, excluded_ids: set[int] | None = None,
+) -> int:
+    """
+    Append up to `n_each` new candidates built around each player in
+    `player_rows` (locked in), so a min-exposure target has lineups to pick
+    from. Returns how many were added.
+    """
+    seen = {lineup_key(c.player_ids, c.captain_id) for c in candidates}
+    added = 0
+    for k, row in enumerate(player_rows):
+        new = generate_candidates(df, scores, n_each, fmt=fmt, stack_rules=stack_rules,
+                                  seed=None if seed is None else seed + 7919 * (k + 1),
+                                  locked_ids={int(row)}, excluded_ids=excluded_ids)
+        for lu in new:
+            key = lineup_key(lu.player_ids, lu.captain_id)
+            if key not in seen:
+                seen.add(key)
+                candidates.append(lu)
+                added += 1
+    return added
+
+
+def candidates_from_ids(df: pd.DataFrame, lineups: list[list[str]], stack_rules=None,
+                        existing: list[LineupResult] | None = None) -> tuple[list[LineupResult], dict]:
+    """
+    Classic lineups given as DK player ids (another optimizer's export, e.g.
+    SaberSim's) -> candidates over `df` rows. Kept only if every player is
+    in the pool (projected) and the lineup meets `stack_rules` (any one of a
+    list); duplicates of `existing` are dropped. Returns (kept, counts).
+    """
+    from .optimize import satisfies_stack_rules
+    rule_sets = stack_rules if isinstance(stack_rules, list) else [stack_rules]
+    row_of = {str(d): i for i, d in enumerate(df["dk_id"].astype(str))}
+    proj = df["proj"].to_numpy(dtype=float)
+    salary = df["salary"].to_numpy(dtype=int)
+    seen = {lineup_key(c.player_ids, c.captain_id) for c in (existing or [])}
+    pos = df["position"].to_numpy()
+    kept, counts = [], {"read": len(lineups), "not_in_pool": 0, "invalid": 0, "breaks_rules": 0, "duplicate": 0}
+    for ids in lineups:
+        rows = [row_of.get(str(d)) for d in ids]
+        if any(r is None for r in rows):
+            counts["not_in_pool"] += 1
+            continue
+        n = {p: int((pos[rows] == p).sum()) for p in ("QB", "RB", "WR", "TE", "DST")}
+        if (len(set(rows)) != 9 or salary[rows].sum() > SALARY_CAP or n["QB"] != 1 or n["DST"] != 1
+                or not (2 <= n["RB"] <= 3 and 3 <= n["WR"] <= 4 and 1 <= n["TE"] <= 2)):
+            counts["invalid"] += 1
+            continue
+        if not any(satisfies_stack_rules(df, rows, r) for r in rule_sets):
+            counts["breaks_rules"] += 1
+            continue
+        key = lineup_key(rows, None)
+        if key in seen:
+            counts["duplicate"] += 1
+            continue
+        seen.add(key)
+        kept.append(LineupResult(sorted(rows), None, int(salary[rows].sum()), float(proj[rows].sum())))
+    counts["kept"] = len(kept)
+    return kept, counts
 
 
 # ---------------------------------------------------------------------------
@@ -678,13 +747,13 @@ def calibrate_spread(
     ceiling) so the simulated field's score spread matches real
     Millionaire Makers. `simulate(df, n_trials, seed, spread_scale)` must
     return a score matrix. Returns (spread_scale, ratios at that scale,
-    target); spread_scale is None when every player has his own ceiling
-    (nothing to fit -- the ratios are then just a diagnostic).
+    target); spread_scale is None when every player has his own ceiling or
+    percentiles (nothing to fit -- the ratios are then just a diagnostic).
     """
     target = np.asarray(target, dtype=float)
     proj = df["proj"].to_numpy(dtype=float)
     ceil = df["ceiling"].to_numpy(dtype=float) if "ceiling" in df.columns else np.full(len(df), np.nan)
-    if (np.isfinite(ceil) & (ceil > proj)).all():
+    if ((np.isfinite(ceil) & (ceil > proj)) | percentile_mask(df)).all():
         return None, field_score_ratios(field_w, simulate(df, n_trials, seed, None)), target
 
     def err(k):
@@ -826,6 +895,16 @@ def simulate_contest(
 # 4. Portfolio selection
 # ---------------------------------------------------------------------------
 
+def player_exposure_limits(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+    """Per-player (min, max) exposure fractions from optional `min_exp` / `max_exp` pool columns
+    (e.g. SaberSim's Min/Max Exp); defaults 0 and 1 mean no limit of the player's own."""
+    def col(name, default):
+        v = pd.to_numeric(df[name], errors="coerce") if name in df.columns else pd.Series(np.nan, index=df.index)
+        v = v / 100.0 if v.max() > 1.0 else v  # given as percentages
+        return v.fillna(default).clip(0.0, 1.0).to_numpy(dtype=float)
+    return col("min_exp", 0.0), col("max_exp", 1.0)
+
+
 def _share_count(share: float | None, n_lineups: int) -> int:
     """Lineups a share cap allows. Any positive share allows at least one, like the player caps:
     flooring 0.5 x 1 entry to zero would ban the structure outright in single-entry contests."""
@@ -871,6 +950,10 @@ def select_portfolio(
     Players salaried under `cheap_salary` are capped at `cheap_cap` of the
     picks, so one punt that scores zero can't sink every lineup;
     `max_rb_pair_share` caps the share of picks with two RBs from one team.
+    Optional `min_exp` / `max_exp` pool columns set a player's own limits
+    (they override the default caps; max 0 bans him). Minimums are filled
+    first, each with the best eligible lineup containing the player -- the
+    candidate pool must hold enough of them (`add_locked_candidates`).
     """
     if objective not in ("roi", "top1", "emax"):
         raise ValueError("objective must be 'roi', 'top1' or 'emax'")
@@ -881,7 +964,12 @@ def select_portfolio(
     if cheap_salary is not None:
         cheap = df["salary"].to_numpy(dtype=float) < cheap_salary
         caps = np.where(cheap, np.minimum(caps, cheap_cap), caps)
+    min_exp, max_exp = player_exposure_limits(df)
+    caps = np.where(max_exp < 1.0, max_exp, caps)    # a player's own limit beats the defaults
+    caps = np.maximum(caps, min_exp)
     max_count = np.maximum(1, np.floor(caps * n_lineups)).astype(int)
+    max_count[max_exp <= 0] = 0                       # max 0% = banned
+    need = np.ceil(min_exp * n_lineups - 1e-9).astype(int)
 
     ev = result.payouts.mean(axis=0).astype(np.float64)
     is_big = np.array([max_game_stack(df, c) >= game_stack_size for c in candidates]) \
@@ -916,22 +1004,38 @@ def select_portfolio(
                               - best_pay[:, None]).mean(axis=0)
             score = gain + 1e-6 * ev / max(ev.max(), 1e-9)
         score[~available] = -np.inf
+        order = np.argsort(-score)
 
+        # Min exposures first: while players are short, the pick is the best lineup with all of
+        # them, else with the one furthest short (ties: higher minimum), else any lineup.
+        short = need - counts
+        passes = [set()]
+        if (short > 0).any():
+            lead = {int(np.argmax(short + 1e-3 * min_exp))}
+            everyone = set(np.flatnonzero(short > 0).tolist())
+            passes = ([everyone] if len(everyone) > 1 else []) + [lead, set()]
         picked = None
-        for idx in np.argsort(-score):
-            if not available[idx]:
+        for require in passes:
+            for idx in order:
+                if score[idx] == -np.inf:
+                    break
+                if not available[idx]:  # ruled out earlier in this pick
+                    continue
+                if require and not require <= sets[idx]:
+                    continue
+                ids = candidates[idx].player_ids
+                if (is_big[idx] and n_big >= max_big) or (is_pair[idx] and n_pair >= max_pair):
+                    available[idx] = False
+                    continue
+                ok = (counts[ids] < max_count[ids]).all() and all(
+                    len(sets[idx] ^ sets[j]) >= 2 * min_unique for j in chosen
+                )
+                if ok:
+                    picked = idx
+                    break
+                available[idx] = False  # it can only get less eligible from here
+            if picked is not None:
                 break
-            ids = candidates[idx].player_ids
-            if (is_big[idx] and n_big >= max_big) or (is_pair[idx] and n_pair >= max_pair):
-                available[idx] = False
-                continue
-            ok = (counts[ids] < max_count[ids]).all() and all(
-                len(sets[idx] ^ sets[j]) >= 2 * min_unique for j in chosen
-            )
-            if ok:
-                picked = idx
-                break
-            available[idx] = False  # it can only get less eligible from here
         if picked is None:
             break
         chosen.append(int(picked))

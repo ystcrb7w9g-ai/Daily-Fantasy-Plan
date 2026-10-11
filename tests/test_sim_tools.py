@@ -81,6 +81,46 @@ def test_missing_ceiling_gets_position_default():
         assert np.allclose(np.percentile(sc, 85, axis=0) / expect, 1.0, atol=0.06)
 
 
+# --- provided percentiles (SaberSim) ---------------------------------------
+
+SKEW = {"p25": 0.50, "p50": 0.88, "p75": 1.40, "p85": 1.74, "p95": 2.40, "p99": 3.25}  # x proj
+
+
+def _with_percentiles(df, rows=None):
+    df = df.copy()
+    rows = df.index if rows is None else rows
+    for c, m in SKEW.items():
+        df[c] = np.nan
+        df.loc[rows, c] = df.loc[rows, "proj"] * m
+    return df
+
+
+def test_percentiles_set_the_shape_and_keep_the_mean():
+    df = _with_percentiles(_multi_game_pool())
+    sc = simulate_player_scores(df, n_trials=20000, seed=21)
+    proj = df["proj"].to_numpy()
+    for c, m in SKEW.items():
+        got = np.percentile(sc, float(c[1:]), axis=0) / (proj * m)
+        assert np.median(np.abs(got - 1)) < 0.05, c  # mean rescale nudges each point a little
+    assert np.allclose(sc.mean(axis=0) / proj, 1.0, atol=0.01)
+
+
+def test_percentiles_keep_correlations_and_leave_other_players_alone():
+    base = _multi_game_pool()
+    qb = base.index[base["name"] == "AAA_QB0"][0]
+    wr = base[(base["team"] == "AAA") & (base["position"] == "WR")]["proj"].idxmax()
+    other = base.index[base["name"] == "CCC_WR0"][0]
+    df = _with_percentiles(base, rows=base.index != other)
+    plain = simulate_player_scores(df, n_trials=20000, seed=22, use_percentiles=False)
+    mapped = simulate_player_scores(df, n_trials=20000, seed=22)
+    rank = lambda x: np.argsort(np.argsort(x, kind="stable"), kind="stable")  # noqa: E731 (ties at 0)
+    assert np.array_equal(rank(plain[:, qb]), rank(mapped[:, qb]))  # same trial order per player
+    c0 = np.corrcoef(plain[:, qb], plain[:, wr])[0, 1]
+    c1 = np.corrcoef(mapped[:, qb], mapped[:, wr])[0, 1]
+    assert c0 > 0.2 and abs(c0 - c1) < 0.06
+    assert np.allclose(plain[:, other], mapped[:, other])  # no percentiles -> untouched
+
+
 # --- outcomes report -------------------------------------------------------
 
 def test_player_outcomes_columns_and_ranges():
