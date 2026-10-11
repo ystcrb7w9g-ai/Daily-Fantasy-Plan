@@ -85,6 +85,58 @@ RUSH_REF = 0.15  # average QB1 share of DK points from rushing (2021-25: 0.158)
 PERCENTILE_LEVELS = {"p25": 0.25, "p50": 0.50, "p75": 0.75, "p85": 0.85, "p95": 0.95, "p99": 0.99}
 
 
+# Shared touchdowns (2021-25 regular season): a team's passing TDs score for its
+# QB (4) and the receiver (6) together, which is where real teammates' co-booms
+# come from. Receiving-TD weights per unit of projection reproduce the real
+# split (WR 63% / TE 25% / RB 12%); rushing TDs go to RBs and the QB (RB 74% /
+# QB 21%).
+# `TD_MODEL`: knobs fitted with the TD layer on (scratch grid vs 2021-25 games scored relative to
+# Vegas-adjusted expectation). Against the production knobs it lifts "QB1 top-5% game -> a WR/TE
+# top-10% game" from 66% to 75% (real 86%), QB1~WR2 from 0.22 to 0.31 (0.35), QB1~opp QB1 from
+# 0.11 to 0.15 (0.20) and RB1~RB2 from -0.13 to -0.04 (-0.03); QB1+WR1+WR2 co-booms go from
+# 3.5x to 4.4x chance (3.9x).
+TD_MODEL = {"td_layer": 1.0, "td_game_sd": 0.45, "te_link_weight": 1.0, "qb_catcher_link": 0.25}
+PASS_TDS_PER_TEAM = 1.46
+RUSH_TDS_PER_TEAM = 0.91
+AVG_TEAM_TOTAL = 22.5
+REC_TD_WEIGHT = {"WR": 1.0, "TE": 1.3, "RB": 0.25}
+RUSH_TD_WEIGHT = {"RB": 1.0, "QB": 0.34}
+
+
+def touchdown_points(df: pd.DataFrame, team_points: np.ndarray, player_team_idx: np.ndarray,
+                     team_names: list, rng: np.random.Generator) -> np.ndarray:
+    """
+    Per-trial TD points from a team-level TD layer, centered on each player's
+    mean (so it reshapes, not shifts). Each team's passing and rushing TD
+    counts are Poisson with rates scaled by its simulated points; passing TDs
+    go to its top-projected QB (4 each) and to receivers by weight (6 each),
+    rushing TDs to its RBs / QB (6 each).
+    """
+    n_trials, n_players = team_points.shape[0], len(df)
+    pos = df["position"].to_numpy()
+    proj = df["proj"].to_numpy(dtype=float).clip(min=0.0)
+    out = np.zeros((n_trials, n_players))
+    scale = np.clip(team_points / AVG_TEAM_TOTAL, 0.02, None)
+    for t in range(len(team_names)):
+        on = np.flatnonzero(player_team_idx == t)
+        if not len(on):
+            continue
+        qbs = on[pos[on] == "QB"]
+        qb = qbs[np.argmax(proj[qbs])] if len(qbs) else None
+        for rate, weights, qb_pts in ((PASS_TDS_PER_TEAM, REC_TD_WEIGHT, 4.0), (RUSH_TDS_PER_TEAM, RUSH_TD_WEIGHT, 0.0)):
+            w = np.array([weights.get(p, 0.0) for p in pos[on]]) * proj[on]
+            if weights is RUSH_TD_WEIGHT and qb is not None:
+                w = np.where(on == qb, w, np.where(pos[on] == "QB", 0.0, w))  # backup QBs don't run it in
+            if w.sum() <= 0:
+                continue
+            n_tds = rng.poisson(rate * scale[:, t])
+            counts = rng.multinomial(n_tds, w / w.sum())
+            out[:, on] += 6.0 * counts
+            if qb_pts and qb is not None:
+                out[:, qb] += qb_pts * n_tds
+    return out - out.mean(axis=0, keepdims=True)
+
+
 def percentile_mask(df: pd.DataFrame) -> np.ndarray:
     """Players with a full set of provided percentiles (and a positive projection)."""
     cols = list(PERCENTILE_LEVELS)
@@ -152,6 +204,8 @@ def simulate_player_scores(
     ceiling_pct: float = 0.85,
     spread_scale: float | None = DEFAULT_SPREAD_SCALE,
     use_percentiles: bool = True,
+    td_layer: float = 0.0,
+    td_game_sd: float = 0.0,
 ) -> np.ndarray:
     """
     Simulate fantasy points for every player in `df` across `n_trials`
@@ -325,6 +379,11 @@ def simulate_player_scores(
     ) * noise_sd
 
     scores = mean_component + noise_component
+    if td_layer:
+        game_td = np.exp(rng.normal(0.0, td_game_sd, size=(n_trials, n_games)) - td_game_sd ** 2 / 2) \
+            if td_game_sd else np.ones((n_trials, n_games))
+        scores = scores + td_layer * touchdown_points(
+            df, team_points_draw * game_td[:, team_game_arr], player_team_idx, team_names, rng)
     if calibrate_ceiling:
         ceiling = (df["ceiling"].to_numpy(dtype=float) if "ceiling" in df.columns
                    else np.full(n_players, np.nan))

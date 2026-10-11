@@ -121,6 +121,46 @@ def test_percentiles_keep_correlations_and_leave_other_players_alone():
     assert np.allclose(plain[:, other], mapped[:, other])  # no percentiles -> untouched
 
 
+# --- shared touchdowns (TD layer) ------------------------------------------
+
+def test_touchdown_points_are_centered_and_shared_by_qb_and_receivers():
+    from dfs_engine.simulate import touchdown_points
+    df = _multi_game_pool()
+    teams = sorted(df["team"].unique())
+    idx = df["team"].map({t: i for i, t in enumerate(teams)}).to_numpy()
+    team_pts = np.full((20000, len(teams)), 22.5)
+    td = touchdown_points(df, team_pts, idx, teams, np.random.default_rng(3))
+    assert np.abs(td.mean(axis=0)).max() < 1e-9
+    a = df[df["team"] == "AAA"]
+    qb = a[a["position"] == "QB"]["proj"].idxmax()
+    rec = a.index[a["position"].isin(["WR", "TE"])]
+    assert np.corrcoef(td[:, qb], td[:, rec].sum(axis=1))[0, 1] > 0.6  # his TD passes are their catches
+    backup = a[(a["position"] == "QB") & (a.index != qb)].index
+    assert np.allclose(td[:, backup], 0.0)                                 # backups don't share the TDs
+    dst = df.index[df["position"] == "DST"]
+    assert np.allclose(td[:, dst], 0.0)
+
+
+def test_td_model_makes_qb_booms_come_with_receiver_booms():
+    from dfs_engine.simulate import TD_MODEL
+    df = _multi_game_pool()
+    a = df[df["team"] == "AAA"]
+    qb = a[a["position"] == "QB"]["proj"].idxmax()
+    rec = a.index[a["position"].isin(["WR", "TE"])]
+
+    def qb_boom_with_receiver(sc):
+        boom = sc[:, qb] >= np.quantile(sc[:, qb], 0.95)
+        hit = np.zeros(len(sc), dtype=bool)
+        for j in rec:
+            hit |= sc[:, j] >= np.quantile(sc[:, j], 0.90)
+        return hit[boom].mean()
+
+    base = simulate_player_scores(df, n_trials=30000, seed=31)
+    td = simulate_player_scores(df, n_trials=30000, seed=31, **TD_MODEL)
+    assert qb_boom_with_receiver(td) > qb_boom_with_receiver(base) + 0.03
+    assert np.allclose(td.mean(axis=0) / df["proj"].to_numpy(), 1.0, atol=0.06)
+
+
 # --- outcomes report -------------------------------------------------------
 
 def test_player_outcomes_columns_and_ranges():

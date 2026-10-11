@@ -440,6 +440,34 @@ SaberSim's single Milly lineup was the best one tested (3.0% top-1% vs our
 0.5 x 1 entry to zero, banning every 4-man game stack in a single-entry
 contest. Fixed: any positive share allows at least one lineup.
 
+### Shared touchdowns (`--td-model`)
+
+The base simulator moves DK points with symmetric, correlated noise. Real
+teammates co-move through shared stat events instead -- a TD pass scores for
+the QB (4) and his receiver (6) at once -- so their dependence sits in the
+boom games. Scored relative to expectation (season average x the game's Vegas
+team total), 2021-25 games show it; the production knobs fit the average
+correlations but not where they come from:
+
+| 2021-25, relative to expectation | real | production | `--td-model` |
+|---|---|---|---|
+| QB1 top-5% game -> a WR/TE teammate top-10% | 86% | 66% | 75% |
+| QB1~WR2 / QB1~TE1 correlation | 0.35 / 0.29 | 0.22 / 0.36 | 0.31 / 0.30 |
+| QB1~opp QB1 correlation | 0.20 | 0.11 | 0.15 |
+| RB1~RB2 correlation | -0.03 | -0.13 | -0.04 |
+| QB1 + WR1 + WR2 all top-15% (x chance) | 3.9x | 3.5x | 4.4x |
+| skew RB2 / TE1 | 1.36 / 1.08 | 0.37 / 0.41 | 0.76 / 0.66 |
+
+`--td-model` (on every simulating command) adds a team TD layer: each team's
+passing and rushing TD counts are Poisson with rates scaled by its simulated
+points (and a TD environment shared with its opponent); passing TDs go to the
+top QB plus a receiver by weight, rushing TDs to the RBs / QB; the layer is
+centered so means stay on `proj`. Knobs are in `simulate.TD_MODEL`. It is
+opt-in until the weekly `review` confirms it on real contests. Still not
+modeled: yardage and the 300/100-yard bonuses (in 70-90% of real boom games),
+and starters' near-zero games (real p5 is 0.22-0.25x expectation for RB1/WR1;
+ours is 0) -- SaberSim percentiles fix the marginal shapes when you have them.
+
 ### Late swap (`dk-late-swap`)
 
 Once the early games are under way, you know things the field didn't at

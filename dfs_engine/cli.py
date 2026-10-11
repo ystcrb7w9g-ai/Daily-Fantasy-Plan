@@ -67,7 +67,7 @@ import numpy as np
 import pandas as pd
 
 from .data import load_player_pool, validate_showdown_pool
-from .simulate import DEFAULT_SPREAD_SCALE, percentile_mask, simulate_player_scores
+from .simulate import DEFAULT_SPREAD_SCALE, TD_MODEL, percentile_mask, simulate_player_scores
 from .optimize import ShowdownRules, StackRules
 from .outcomes import player_outcomes
 from . import contest as cs
@@ -121,12 +121,16 @@ def _stack_rules(args: argparse.Namespace) -> StackRules | None:
     return rules
 
 
+def _sim_knobs(args: argparse.Namespace) -> dict:
+    return dict(TD_MODEL) if getattr(args, "td_model", False) else {}
+
+
 def _simulate(df: pd.DataFrame, args: argparse.Namespace, n_trials: int, seed) -> np.ndarray:
     spread = args.spread_scale if args.spread_scale is not None else DEFAULT_SPREAD_SCALE
     return simulate_player_scores(
         df, n_trials=n_trials, seed=seed,
         calibrate_ceiling=not args.no_ceiling_calibration, ceiling_pct=args.ceiling_pct,
-        spread_scale=spread,
+        spread_scale=spread, **_sim_knobs(args),
     )
 
 
@@ -135,7 +139,7 @@ def _fit_spread(df: pd.DataFrame, field: np.ndarray, args: argparse.Namespace) -
     if args.spread_scale is not None or args.no_ceiling_calibration:
         return
     sim = lambda d, n, seed, k: simulate_player_scores(  # noqa: E731
-        d, n_trials=n, seed=seed, ceiling_pct=args.ceiling_pct, spread_scale=k)
+        d, n_trials=n, seed=seed, ceiling_pct=args.ceiling_pct, spread_scale=k, **_sim_knobs(args))
     k, ratios, target = cs.calibrate_spread(df, field, sim)
     fmt = lambda r: "/".join(f"{x:.2f}" for x in r)  # noqa: E731
     if k is None:
@@ -151,6 +155,9 @@ def _add_sim_args(p: argparse.ArgumentParser) -> None:
                    help="percentile the `ceiling` column represents (calibrates each player's spread)")
     p.add_argument("--no-ceiling-calibration", action="store_true",
                    help="ignore `ceiling` and use the default fixed-fraction spread")
+    p.add_argument("--td-model", action="store_true",
+                   help="simulate shared team TDs (QB + receiver score together) with knobs fitted to "
+                        "real 2021-25 co-booms; see simulate.TD_MODEL")
     p.add_argument("--spread-scale", type=float, default=None,
                    help="width of default ceilings for players without one (default: fitted to "
                         "real Milly score spreads in contest/dk-run, %.2f elsewhere)" % DEFAULT_SPREAD_SCALE)
