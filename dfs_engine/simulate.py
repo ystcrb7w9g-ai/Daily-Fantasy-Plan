@@ -90,12 +90,22 @@ PERCENTILE_LEVELS = {"p25": 0.25, "p50": 0.50, "p75": 0.75, "p85": 0.85, "p95": 
 # come from. Receiving-TD weights per unit of projection reproduce the real
 # split (WR 63% / TE 25% / RB 12%); rushing TDs go to RBs and the QB (RB 74% /
 # QB 21%).
-# `TD_MODEL`: knobs fitted with the TD layer on (scratch grid vs 2021-25 games scored relative to
-# Vegas-adjusted expectation). Against the production knobs it lifts "QB1 top-5% game -> a WR/TE
-# top-10% game" from 66% to 75% (real 86%), QB1~WR2 from 0.22 to 0.31 (0.35), QB1~opp QB1 from
-# 0.11 to 0.15 (0.20) and RB1~RB2 from -0.13 to -0.04 (-0.03); QB1+WR1+WR2 co-booms go from
-# 3.5x to 4.4x chance (3.9x).
-TD_MODEL = {"td_layer": 1.0, "td_game_sd": 0.45, "te_link_weight": 1.0, "qb_catcher_link": 0.25}
+# `TD_MODEL`: the simulator's knobs refit with the TD layer on (scratch random
+# search, Oct 2026) against 2021-25 games scored relative to Vegas-adjusted
+# expectation: all 21 same-team and 49 opponent role-pair correlations, co-boom
+# / co-bust rates, team-total spread and the opponent link. Real fields have
+# almost no correlation outside the QB (RB~WR 0.00, WR1~WR2 0.04, most
+# opponent pairs 0-0.1); the old knobs added +0.05-0.15 to every pair through a
+# strong shared game factor. Fit error (RMS of those targets in noise units):
+# old knobs 2.16, first TD knobs 2.16, these 1.30; same-team pair RMS gap
+# 0.066 -> 0.030, opponent 0.065 -> 0.043; "QB1 top-5% game -> a WR/TE
+# top-10% game" 66% -> 76% (real 86%); QB1+WR1+WR2 co-booms 3.6x -> 3.7x
+# (3.9x). Ranking 40k real Milly lineups by simulated top-1% chance (AUC for
+# a real top-1% finish): Week 5 0.632 (old) -> 0.649, Week 4 0.570 -> 0.569.
+TD_MODEL = {"game_total_sd_frac": 0.051, "team_split_sd": 0.653, "target_competition_weight": 0.380,
+            "game_script_weight": 0.046, "rb_competition_weight": 0.202, "qb_catcher_link": 0.40,
+            "shootout_sd": 0.176, "rb_link_weight": 0.223, "te_link_weight": 1.0, "td_layer": 1.3,
+            "td_game_sd": 0.35, "residual_sd_frac": 0.944}
 PASS_TDS_PER_TEAM = 1.46
 RUSH_TDS_PER_TEAM = 0.91
 AVG_TEAM_TOTAL = 22.5

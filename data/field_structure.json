@@ -1,5 +1,5 @@
 {
- "source": "2026 Week 1-4 DK NFL Millionaire Maker standings, 40k lineups per group, players mapped to teams with nflverse rosters (field-structure command)",
+ "source": "2026 Week 1-5 DK NFL Millionaire Maker standings, ~40k lineups per group, players mapped to teams with nflverse rosters (field-structure command; Week 5 mapped with that week's DK player pool)",
  "weeks": {
   "week1": {
    "all": {
@@ -352,6 +352,31 @@
     "qb_with_own_rb": 0.196,
     "rb_with_own_dst": 0.1986,
     "any_vs_own_dst": 0.0422
+   }
+  },
+  "week5": {
+   "all": {
+    "n": 39805,
+    "qb_stack_0_1_2_3plus": [
+     0.1021,
+     0.479,
+     0.3848,
+     0.0341
+    ],
+    "bring_back_0_1_2plus": [
+     0.4232,
+     0.4512,
+     0.1255
+    ],
+    "max_game_le3_4_5_6plus": [
+     0.5859,
+     0.2969,
+     0.0945,
+     0.0227
+    ],
+    "qb_with_own_rb": 0.1365,
+    "rb_with_own_dst": 0.1586,
+    "any_vs_own_dst": 0.0768
    }
   }
  }

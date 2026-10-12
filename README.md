@@ -218,12 +218,14 @@ What it does:
    simulated 165k-entry Milly has 6.7% of entries in duplicated lineups
    and a top lineup at ~60–140 copies, versus 5.7–10.2% and 69–346 in real
    2026 Millys. The rest are sampled from projected ownership, all
-   salary-legal and at least `--field-min-salary` (default $49k Classic,
-   $47k Showdown). They're resampled so that 19% / 53% / 28% pair the QB
-   with 0 / 1 / 2+ of his own pass catchers, as measured in real Millys
-   (`--field-stack-mix`). The sampling weights are then calibrated so the
-   whole field's ownership, optimizer slice included, matches your `own`
-   column.
+   salary-legal. Classic lineups spend like real ones: each draws its
+   salary floor from $50k / $49.8k / $49.5k / $49k (40 / 40 / 15 / 5%;
+   `--field-min-salary` sets one fixed floor instead; Showdown uses $47k).
+   They're resampled so that 15% / 51% / 34% pair the QB with 0 / 1 / 2+
+   of his own pass catchers (`--field-stack-mix`). That is the real Milly
+   mix, recency-weighted over Weeks 1–5 (`contest.field_targets`). The
+   sampling weights are then calibrated so the whole field's ownership,
+   optimizer slice included, matches your `own` column.
 
    The field also copies how real lineups are built. In 160k real
    Milly lineups from Weeks 1–4 (`field-structure`,
@@ -241,6 +243,27 @@ What it does:
    Matching ownership alone wasn't enough. The realistic field re-ranks
    candidates: expected payouts correlate only 0.74 with the old field's,
    and 8 of the top 20 candidates change. Applied on slates of 6+ games.
+
+   Week 5 (40k real Milly lineups vs a 20k simulated field on the same
+   SaberSim pool) showed two more gaps, now fixed. The old $49k floor left
+   40% of the field under $49.5k; real lineups do that 4% of the time.
+   Real fields also stack more as the season goes: bring-backs ran
+   44 / 44 / 41 / 44 / 58% in Weeks 1–5. The targets now weight the
+   recent weeks most (half-life 2 weeks).
+
+   | Week 5 Milly | real | old field | field now |
+   |---|---|---|---|
+   | QB + 2 or more of his pass catchers | 42% | 27% | 33% |
+   | a bring-back | 58% | 42% | 47% |
+   | 4+ players from one game | 41% | 27% | 31% |
+   | the QB's own RB / an RB with his own DST | 14% / 16% | 18% / 16% | 15% / 16% |
+   | a player facing the lineup's own DST | 8% | 8% | 9% |
+   | average salary used | $49,875 | $49,555 | $49,883 |
+   | at exactly $50k / at $49.5k or more | 50% / 96% | 15% / 60% | 52% / 97% |
+
+   Stacking still falls short of Week 5, partly by design: a recency
+   weight, not one week's spike. Real fields stack on purpose. Drawn
+   independently, even the *actual* Week 5 ownership gives only 18% QB+2.
 3. **Contest sim.** Scores candidates and field on a *separate* set of
    simulations (`--eval-trials`), so lineups aren't graded on the outcomes
    they were built from. Each sampled field lineup stands for
@@ -440,7 +463,7 @@ SaberSim's single Milly lineup was the best one tested (3.0% top-1% vs our
 0.5 x 1 entry to zero, banning every 4-man game stack in a single-entry
 contest. Fixed: any positive share allows at least one lineup.
 
-### Shared touchdowns (`--td-model`)
+### Shared touchdowns (TD model, on by default)
 
 The base simulator moves DK points with symmetric, correlated noise. Real
 teammates co-move through shared stat events instead -- a TD pass scores for
@@ -449,24 +472,49 @@ boom games. Scored relative to expectation (season average x the game's Vegas
 team total), 2021-25 games show it; the production knobs fit the average
 correlations but not where they come from:
 
-| 2021-25, relative to expectation | real | production | `--td-model` |
-|---|---|---|---|
-| QB1 top-5% game -> a WR/TE teammate top-10% | 86% | 66% | 75% |
-| QB1~WR2 / QB1~TE1 correlation | 0.35 / 0.29 | 0.22 / 0.36 | 0.31 / 0.30 |
-| QB1~opp QB1 correlation | 0.20 | 0.11 | 0.15 |
-| RB1~RB2 correlation | -0.03 | -0.13 | -0.04 |
-| QB1 + WR1 + WR2 all top-15% (x chance) | 3.9x | 3.5x | 4.4x |
-| skew RB2 / TE1 | 1.36 / 1.08 | 0.37 / 0.41 | 0.76 / 0.66 |
+| 2021-25, relative to expectation | real | old knobs (`--classic-sim`) | first TD model | TD model now |
+|---|---|---|---|---|
+| QB1 top-5% game -> a WR/TE teammate top-10% | 86% | 66% | 76% | 76% |
+| QB1~WR2 / QB1~TE1 correlation | 0.35 / 0.29 | 0.22 / 0.36 | 0.31 / 0.30 | 0.29 / 0.29 |
+| QB1~opp QB1 correlation | 0.20 | 0.11 | 0.15 | 0.12 |
+| RB1~RB2 correlation | -0.03 | -0.13 | -0.03 | -0.04 |
+| QB1 + WR1 + WR2 all top-15% (x chance) | 3.9x | 3.6x | 4.5x | 3.7x |
+| RMS error, all 21 teammate / 49 opponent role pairs | | 0.066 / 0.065 | 0.065 / 0.070 | 0.030 / 0.043 |
+| fit loss (pairs + boom/bust lifts + team totals) | | 2.16 | 2.16 | 1.30 |
 
-`--td-model` (on every simulating command) adds a team TD layer: each team's
+The TD model adds a team TD layer to every simulating command: each team's
 passing and rushing TD counts are Poisson with rates scaled by its simulated
 points (and a TD environment shared with its opponent); passing TDs go to the
 top QB plus a receiver by weight, rushing TDs to the RBs / QB; the layer is
-centered so means stay on `proj`. Knobs are in `simulate.TD_MODEL`. It is
-opt-in until the weekly `review` confirms it on real contests. Still not
-modeled: yardage and the 300/100-yard bonuses (in 70-90% of real boom games),
-and starters' near-zero games (real p5 is 0.22-0.25x expectation for RB1/WR1;
-ours is 0) -- SaberSim percentiles fix the marginal shapes when you have them.
+centered so means stay on `proj`. `simulate.TD_MODEL` holds all twelve
+correlation knobs, refit together. We scored 240 random draws, then ran a
+local search around the best, on all role pairs plus the boom/bust lifts.
+That search fit the pairs best (loss 1.11), but it ranked Week 4 lineups
+worst. So its QB-catcher link and TD-layer knobs are pulled back toward the
+first TD model, which costs a little fit (loss 1.30). `--classic-sim` goes
+back to the old knobs.
+
+It also ranks *real* lineups at least as well: best on Week 5, a tie on Week 4.
+We took 40k sampled real Milly lineups and simulated the slate. In each
+sim, a lineup scores a hit if it finishes in the top 1% of those 40k. The
+AUC measures how well each lineup's hit rate picks out the lineups that
+really finished top 1% (0.5 is a coin flip):
+
+| AUC for a real top-1% finish | Week 5 (SaberSim pool) | Week 4 (public projections) |
+|---|---|---|
+| projected points alone, no sim | 0.468 | 0.452 |
+| old knobs | 0.632 | 0.570 |
+| first TD model | 0.643 | 0.578 |
+| pure pair refit | 0.645 | 0.564 |
+| TD model now | **0.649** | 0.569 |
+
+Week 4 differences are within noise (345 top-1% lineups). Still not modeled:
+yardage and the 300/100-yard bonuses (in 70-90% of real boom games), and
+starters' near-zero games (real p5 is 0.22-0.25x expectation for RB1/WR1;
+ours is 0). SaberSim percentiles fix the marginal shapes when you have them.
+On Week 5 they were the best-calibrated shapes we have: RMS 0.034 across
+p5-p99, vs 0.055 for our own. Default curves fit to Weeks 1-4 did worse out
+of sample (0.104), so none ship.
 
 ### Late swap (`dk-late-swap`)
 
@@ -678,8 +726,10 @@ build differently from the casual crowd:
 | 4+ players from one game | 18–19% | 32–34% |
 | a player facing own DST | 7–11% | 3–4% |
 
-Run it on each week's export. If the "all" rates drift from
-`contest.DEFAULT_FIELD_STRUCTURE`, update the defaults.
+Run it on each week's export and add the week's "all" row to
+`data/field_structure.json`. `contest.field_targets` turns the file into the
+recency-weighted stack mix and structure rates. Copy them into
+`DEFAULT_STACK_MIX` / `DEFAULT_FIELD_STRUCTURE`; a test checks they match.
 
 ### Scoring an ownership source (`own-eval`)
 
@@ -895,7 +945,7 @@ data/
   sample_sgo_events.json  # SGO /events snapshot matching the sample pool
   field_profile.json      # aggregate field behavior from three 2026 Millys
   correlation_profile.json # role-pair DK score correlations, 2021-25 regular seasons
-  field_structure.json    # real Milly lineup structure by entrant group, Weeks 1-4
+  field_structure.json    # real Milly lineup structure by entrant group, Weeks 1-5
   projection_model.json   # our projection model (fit on 2021-25 nflverse + Vegas)
 ```
 

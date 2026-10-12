@@ -122,7 +122,10 @@ def _stack_rules(args: argparse.Namespace) -> StackRules | None:
 
 
 def _sim_knobs(args: argparse.Namespace) -> dict:
-    return dict(TD_MODEL) if getattr(args, "td_model", False) else {}
+    """The TD model unless --classic-sim (or a command without sim args)."""
+    if not hasattr(args, "classic_sim"):
+        return {}
+    return {} if args.classic_sim else dict(TD_MODEL)
 
 
 def _simulate(df: pd.DataFrame, args: argparse.Namespace, n_trials: int, seed) -> np.ndarray:
@@ -155,9 +158,10 @@ def _add_sim_args(p: argparse.ArgumentParser) -> None:
                    help="percentile the `ceiling` column represents (calibrates each player's spread)")
     p.add_argument("--no-ceiling-calibration", action="store_true",
                    help="ignore `ceiling` and use the default fixed-fraction spread")
-    p.add_argument("--td-model", action="store_true",
-                   help="simulate shared team TDs (QB + receiver score together) with knobs fitted to "
-                        "real 2021-25 co-booms; see simulate.TD_MODEL")
+    p.add_argument("--classic-sim", action="store_true",
+                   help="use the original correlation knobs instead of the default TD model (shared team "
+                        "TDs, knobs refit to real 2021-25 player pairs; see simulate.TD_MODEL)")
+    p.add_argument("--td-model", action="store_true", help=argparse.SUPPRESS)  # the default now; kept for old scripts
     p.add_argument("--spread-scale", type=float, default=None,
                    help="width of default ceilings for players without one (default: fitted to "
                         "real Milly score spreads in contest/dk-run, %.2f elsewhere)" % DEFAULT_SPREAD_SCALE)
@@ -618,8 +622,8 @@ def cmd_dk_run(args: argparse.Namespace) -> None:
     if percentile_mask(df).any():
         print(f"  {int(percentile_mask(df).sum())} players carry their own p25-p99 percentiles "
               "(sims mapped onto them; correlations stay ours)")
-    if getattr(args, "td_model", False):
-        print("  TD model on: shared team TDs, knobs " + ", ".join(f"{k}={v}" for k, v in TD_MODEL.items()))
+    if _sim_knobs(args):
+        print("  TD model on (default; --classic-sim for the old knobs): shared team TDs, knobs refit to real pairs")
     _apply_exposure_flags(df, args)
     _exposure_note(df)
     min_exp, max_exp = cs.player_exposure_limits(df)
@@ -1163,7 +1167,8 @@ def main() -> None:
     p_con.add_argument("--field-size", type=int, default=20000,
                        help="sampled field lineups standing in for the contest")
     p_con.add_argument("--field-min-salary", type=int, default=None,
-                       help="default $49,000 Classic / $47,000 Showdown (auto-lowered for tiny pools)")
+                       help="one fixed floor; default Classic draws each lineup's floor like real fields "
+                            "($50k/$49.8k/$49.5k/$49k), Showdown $47,000 (auto-lowered for tiny pools)")
     p_con.add_argument("--field-stack-mix", default=",".join(map(str, cs.DEFAULT_STACK_MIX)),
                        help="field share with 0,1,2+ of the QB's own WR/TE ('none' to disable; "
                             "default %(default)s, measured in real Millys)")

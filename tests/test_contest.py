@@ -360,6 +360,9 @@ def test_player_min_exposure_is_met_when_lineups_exist():
     want.loc[target, "min_exp"] = 30.0  # ... or as a percentage
     want["min_exp"] = want["min_exp"].astype(float)
     assert _counts(df, cands, cs.select_portfolio(want, cands, res, 10, min_unique=1))[target] >= 3
+    want.loc[target, "min_exp"] = 0.6  # 60% of 3 rounds up to 2 even under a 40% global cap (1 of 3)
+    picks = cs.select_portfolio(want, cands, res, 3, min_unique=1, max_exposure=0.4)
+    assert _counts(df, cands, picks)[target] >= 2
 
 
 def test_add_locked_candidates_builds_lineups_around_a_player():
@@ -393,3 +396,30 @@ def test_candidates_from_ids_keeps_rule_abiding_lineups_only():
     assert n["kept"] == len(good) - 1 and n["duplicate"] == 1
     assert n["breaks_rules"] == 1 and n["not_in_pool"] == 1 and n["invalid"] == 1
     assert [sorted(k.player_ids) for k in kept] == [sorted(c.player_ids) for c in good[1:]]
+
+
+# --- field targets / salary spend (2026 Week 1-5 Millys) ---------------------
+
+def test_field_defaults_match_the_shipped_field_structure():
+    import json
+    path = os.path.join(os.path.dirname(__file__), "..", "data", "field_structure.json")
+    mix, rates = cs.field_targets(json.load(open(path)))
+    assert np.allclose(mix, cs.DEFAULT_STACK_MIX, atol=0.002)
+    for k, v in rates.items():
+        assert abs(v - cs.DEFAULT_FIELD_STRUCTURE[k]) < 0.002, k
+
+
+def test_field_targets_weight_recent_weeks_more():
+    wk = lambda qb2, bb: {"all": {"qb_stack_0_1_2_3plus": [0.2, 0.8 - qb2, qb2, 0.0], "bring_back_0_1_2plus": [1 - bb, bb, 0.0],  # noqa: E731
+                                  "qb_with_own_rb": 0.2, "rb_with_own_dst": 0.15, "any_vs_own_dst": 0.07}}
+    mix, rates = cs.field_targets({"weeks": {"week1": wk(0.2, 0.4), "week2": wk(0.4, 0.6)}})
+    assert 0.3 < mix[2] < 0.4 and 0.5 < rates["bring_back"] < 0.6  # closer to week 2 than the plain mean
+
+
+def test_classic_field_spends_salary_like_real_fields():
+    df = _value_owned_pool()
+    sal = cs.generate_field(df, 4000, seed=3) @ df["salary"].to_numpy(dtype=float)
+    # real Millys: ~50% at exactly $50,000, 85% at $49,800+, 96% at $49,500+
+    assert 0.35 < (sal == 50_000).mean() < 0.65 and (sal >= 49_800).mean() > 0.75 and (sal >= 49_500).mean() > 0.9
+    flat = cs.generate_field(df, 4000, seed=3, min_salary=49_000) @ df["salary"].to_numpy(dtype=float)
+    assert flat.min() >= 49_000 and (flat >= 49_800).mean() < (sal >= 49_800).mean()  # an explicit floor still wins

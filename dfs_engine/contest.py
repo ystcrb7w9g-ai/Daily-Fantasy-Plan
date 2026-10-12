@@ -31,6 +31,7 @@ and the payout curve is stylized unless you load the real one with
 """
 from __future__ import annotations
 
+import re
 import warnings
 from collections import Counter
 from dataclasses import dataclass, replace
@@ -408,17 +409,18 @@ def _sample_classic(df, logw, n, rng, stack_boost, min_salary, boosts=None):
     return np.concatenate([picked, flex[:, None]], axis=1), None, ok
 
 
-# Real-field lineup structure (2026 Week 1-4 Millionaire Makers, 160k lineups
-# mapped to teams with nflverse rosters; `field_model.structure_summary`):
-# share of lineups with at least one bring-back (player from the QB's
-# opponent), the QB's own RB, an RB on the DST's team, and an offensive
-# player facing the lineup's own DST. Our raw ownership sampler gave
-# 0.24 / 0.10 / 0.08 / 0.22 -- too few correlated builds, 3x too many
-# players against their own DST.
+# Real-field lineup structure (2026 Week 1-5 Millionaire Makers, ~40k lineups
+# a week; `field_model.structure_summary`, data/field_structure.json): share
+# of lineups with at least one bring-back (player from the QB's opponent), the
+# QB's own RB, an RB on the DST's team, and an offensive player facing the
+# lineup's own DST, recency-weighted (`field_targets`, half-life 2 weeks):
+# fields stack more as the season goes (bring-backs 44/44/41/44/58% in Weeks
+# 1-5). Our raw ownership sampler gave 0.24 / 0.10 / 0.08 / 0.22 -- too few
+# correlated builds, 3x too many players against their own DST.
 # Measured on 12-13 game main slates, so applied only to slates with at
 # least STRUCTURE_MIN_GAMES games (on tiny slates you can hardly avoid
 # facing your own DST).
-DEFAULT_FIELD_STRUCTURE = {"bring_back": 0.431, "qb_rb": 0.183, "rb_dst": 0.158, "vs_dst": 0.070}
+DEFAULT_FIELD_STRUCTURE = {"bring_back": 0.483, "qb_rb": 0.164, "rb_dst": 0.164, "vs_dst": 0.073}
 FIELD_STRUCTURE_KEYS = tuple(DEFAULT_FIELD_STRUCTURE)
 STRUCTURE_MIN_GAMES = 6
 
@@ -475,8 +477,15 @@ def _ids_to_weights(ids, captain, n_players):
 
 
 # Share of field lineups pairing the QB with 0 / 1 / 2+ of his own WR/TE,
-# measured on three 2026 Millionaire Makers (data/field_profile.json).
-DEFAULT_STACK_MIX = (0.19, 0.53, 0.28)
+# recency-weighted over 2026 Week 1-5 Millionaire Makers (`field_targets`;
+# QB+2 was 27/27/31/31/42% by week -- real fields stack deliberately: even
+# sampled from *actual* ownership, independent draws give only ~18%).
+DEFAULT_STACK_MIX = (0.148, 0.511, 0.341)
+
+# Real Milly lineups spend nearly all the salary (2026 Weeks 4-5: 50% at
+# exactly $50,000, 85% at $49,800+, 96% at $49,500+, 99% at $49,000+). Each
+# sampled Classic lineup draws its floor from these (floor, share) pairs.
+CLASSIC_SALARY_FLOORS = ((50_000, 0.40), (49_800, 0.40), (49_500, 0.15), (49_000, 0.05))
 
 # Optimizer slice of the simulated field: share of entries and projection
 # noise chosen so a 165k-entry simulated Milly duplicates like the real
@@ -486,8 +495,27 @@ DEFAULT_OPTIMIZER_SHARE = 0.06
 DEFAULT_OPTIMIZER_NOISE = 0.18
 
 # Real Milly field scores at the top 0.1% / top 1% / top 20%, divided by
-# the median score (same source). Used to fit the simulation's spread.
-HISTORICAL_SCORE_RATIOS = (1.664, 1.512, 1.187)
+# the median score: mean of 2026 Weeks 1-5 (week to week 1.62-1.76 /
+# 1.47-1.58 / 1.17-1.21). Used to fit the simulation's spread.
+HISTORICAL_SCORE_RATIOS = (1.675, 1.514, 1.184)
+
+
+def field_targets(structure: dict, half_life: float = 2.0) -> tuple[tuple[float, float, float], dict]:
+    """
+    (stack_mix, structure rates) from a field_structure.json dict, weighting
+    week k of n by 0.5 ** ((n - k) / half_life) -- the recent weeks count most.
+    """
+    weeks = sorted(structure["weeks"], key=lambda k: int(re.sub(r"\D", "", k) or 0))
+    w = np.array([0.5 ** ((len(weeks) - 1 - i) / half_life) for i in range(len(weeks))])
+    w = w / w.sum()
+    rows = [structure["weeks"][k]["all"] for k in weeks]
+    q = np.array([r["qb_stack_0_1_2_3plus"] for r in rows])
+    mix = (float(w @ q[:, 0]), float(w @ q[:, 1]), float(w @ (q[:, 2] + q[:, 3])))
+    rates = {"bring_back": float(w @ np.array([1 - r["bring_back_0_1_2plus"][0] for r in rows])),
+             "qb_rb": float(w @ np.array([r["qb_with_own_rb"] for r in rows])),
+             "rb_dst": float(w @ np.array([r["rb_with_own_dst"] for r in rows])),
+             "vs_dst": float(w @ np.array([r["any_vs_own_dst"] for r in rows]))}
+    return mix, rates
 
 
 def _qb_stack_counts(ids: np.ndarray, df: pd.DataFrame) -> np.ndarray:
@@ -553,9 +581,11 @@ def generate_field(
 
     - Every slot is drawn with probability proportional to a per-player
       weight; the last slot is restricted to players that keep the lineup
-      between `min_salary` and the cap. `min_salary` defaults to $49,000
-      (Classic) / $47,000 (Showdown); if almost no sampled lineup can reach
-      it (tiny pools) it is lowered, with a warning.
+      between a salary floor and the cap. Classic floors are drawn per
+      lineup from `CLASSIC_SALARY_FLOORS` (real fields spend nearly all of
+      it) unless `min_salary` is given; Showdown uses $47,000. If almost no
+      sampled lineup can reach the floor (tiny pools) it is lowered, with a
+      warning.
     - Classic stacking: QB teammates' WR/TE get a `stack_boost` sampling
       weight, then lineups are resampled so the shares with 0 / 1 / 2+
       QB-stacked pass catchers match `stack_mix` (None = no resampling).
@@ -621,18 +651,32 @@ def generate_field(
             ids, _, ok = draw(np.log(own), 0)
             update_boosts(_ids_to_weights(ids[ok], None, n_players))
 
+    floors = None
     if min_salary is None:
-        min_salary = 49_000 if fmt == "classic" else 47_000
+        if fmt == "classic":  # real fields spend nearly everything: per-lineup floors
+            floors = CLASSIC_SALARY_FLOORS
+            min_salary = min(f for f, _ in floors)
+        else:
+            min_salary = 47_000
     ids, cpt, ok = draw(np.log(own), 0)
     probe = _ids_to_weights(ids[ok], None if cpt is None else cpt[ok], n_players) @ salary
     if len(probe) and (probe >= min_salary).mean() < 0.01:
         new_floor = int(np.quantile(probe, 0.8) // 100 * 100)
         warnings.warn(f"Few sampled lineups reach ${min_salary:,}; using field min salary ${new_floor:,}.")
-        min_salary = new_floor
+        min_salary, floors = new_floor, None
+    elif floors is not None and len(probe) and (probe >= floors[0][0] - 1).mean() < 0.01:
+        floors = None  # a pool that can't spend to the cap (tiny / synthetic slates): single floor
+
+    def floor_for(n):
+        if floors is None:
+            return min_salary
+        levels = np.array([f for f, _ in floors], dtype=float)
+        p = np.array([s for _, s in floors], dtype=float)
+        return rng.choice(levels, size=n, p=p / p.sum())
 
     def sample(weights, n):
         logw = np.log(weights)
-        need = np.round(mix * n).astype(int) if use_mix else np.array([n])
+        need = _largest_remainder(mix, n) if use_mix else np.array([n])  # buckets sum to exactly n
         buckets = [[] for _ in need]
         have = np.zeros(len(need), dtype=int)
         for i in range(500):
@@ -640,7 +684,7 @@ def generate_field(
                 break
             if i == 40 and have.sum() < 0.05 * need.sum():
                 break  # hopeless (salary floor / stack mix unreachable); fail fast
-            ids, cpt, ok = draw(logw, min_salary)
+            ids, cpt, ok = draw(logw, floor_for(batch))
             ids, cpt = ids[ok], (None if cpt is None else cpt[ok])
             if len(ids) == 0:
                 continue
@@ -967,9 +1011,10 @@ def select_portfolio(
     min_exp, max_exp = player_exposure_limits(df)
     caps = np.where(max_exp < 1.0, max_exp, caps)    # a player's own limit beats the defaults
     caps = np.maximum(caps, min_exp)
-    max_count = np.maximum(1, np.floor(caps * n_lineups)).astype(int)
-    max_count[max_exp <= 0] = 0                       # max 0% = banned
     need = np.ceil(min_exp * n_lineups - 1e-9).astype(int)
+    # The cap rounds down and the minimum up (60% of 3 = cap 1, need 2): the minimum wins.
+    max_count = np.maximum(np.maximum(1, np.floor(caps * n_lineups)), need).astype(int)
+    max_count[max_exp <= 0] = 0                       # max 0% = banned
 
     ev = result.payouts.mean(axis=0).astype(np.float64)
     is_big = np.array([max_game_stack(df, c) >= game_stack_size for c in candidates]) \
