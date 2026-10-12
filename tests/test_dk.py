@@ -452,3 +452,115 @@ def test_sabersim_pool_to_dk_run_with_extra_lineups_and_exposure_flags():
     for r in rows:
         by_contest.setdefault(r[2], []).append(ids[must] in r[4:13])
     assert all(sum(v) >= np.ceil(0.6 * len(v)) for v in by_contest.values())  # 1 of 1, 2 of 3
+
+
+# --- Showdown --------------------------------------------------------------
+
+SD_DST = {"ATL": "Falcons", "NO": "Saints"}
+
+
+def _showdown_fixture():
+    """A synthetic DK Showdown entries file (each player as a CPT and a FLEX row) and a
+    SaberSim-layout export with both rows, as for a real single-game slate."""
+    from test_contest import _showdown_pool
+    df = _showdown_pool()
+    df["name"] = [SD_DST[t] if p == "DST" else f"{_alpha(i)} {p.title()}man"
+                  for i, (t, p) in enumerate(zip(df["team"], df["position"]))]
+    d = tempfile.mkdtemp()
+    path = os.path.join(d, "DKEntries_SD.csv")
+    header = dk.ENTRY_COLUMNS + dk.SHOWDOWN_SLOTS + ["", "Instructions"]
+    name = "NFL Showdown $500K Monday Night Showdown [$100K to 1st] (NO @ ATL)"
+    entries = [[str(7001 + k), name, "444", "$5"] + [""] * 6 + [""] for k in range(2)]
+    players = []
+    for i, r in df.iterrows():
+        for slot, pid, sal in (("CPT", 60000 + i, int(r["salary"] * 1.5)), ("FLEX", 50000 + i, int(r["salary"]))):
+            players.append([r["position"], f"{r['name']} ({pid})", r["name"], str(pid), slot, str(sal),
+                            "NO@ATL 10/12/2026 08:15PM ET", r["team"], "11.0"])
+    rows = [header]
+    for k in range(max(len(entries), 8 + len(players))):
+        left = (entries[k] if k < len(entries) else []) + [""] * 11
+        left = left[:11]
+        if k < 6:
+            right = [f"{k + 1}. instructions"]
+        elif k == 6:
+            right = ["Position", "Name + ID", "Name", "ID", "Roster Position", "Salary", "Game Info",
+                     "TeamAbbrev", "AvgPointsPerGame"]
+        elif k - 7 < len(players):
+            right = players[k - 7]
+        else:
+            right = []
+        rows.append(left + right)
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        csv.writer(f).writerows(rows)
+    cpt_own = np.full(len(df), 0.70 / 12)
+    cpt_own[[0, 7]] = [0.25, 0.05]
+    ss_rows = []
+    for i, r in df.iterrows():
+        for pid, mult, own in ((60000 + i, 1.5, cpt_own[i] * 100), (50000 + i, 1.0, 500 / len(df))):
+            row = {"DFS ID": pid, "Name": r["name"], "Pos": r["position"], "Team": r["team"], "Opp": r["opp"],
+                   "Status": "", "Salary": int(r["salary"] * mult), "SS Proj": r["proj"] * mult,
+                   "My Proj": r["proj"] * mult, "My Own": own, "Adj Own": own, "Min Exp": 0, "Max Exp": 100,
+                   "Saber Team": 22.5, "Saber Total": 45.0}
+            for q, m in PCT_MULT.items():
+                row[f"dk_{q}_percentile"] = r["proj"] * mult * m
+            ss_rows.append(row)
+    ss_path = os.path.join(d, "NFL_DK_SHOWDOWN_NO--ATL.csv")
+    pd.DataFrame(ss_rows).to_csv(ss_path, index=False)
+    return df, path, ss_path, d
+
+
+def test_reads_showdown_entry_file_and_sabersim_captain_rows():
+    df, path, ss_path, d = _showdown_fixture()
+    ef = dk.read_entry_file(path)
+    assert ef.fmt == "showdown" and ef.slots == dk.SHOWDOWN_SLOTS and len(ef.entries) == 2
+    assert len(ef.players) == 2 * len(df)
+    pool, unmatched = dk.pool_from_entry_file(ef, dk.read_projections(ss_path))
+    assert unmatched == [] and len(pool) == len(df)
+    assert (pool["dk_id"].astype(int) < 60000).all() and (pool["cpt_dk_id"].astype(int) >= 60000).all()
+    assert np.isclose(pool["cpt_own"].sum(), 100) and np.isclose(pool["own"].sum(), 500)
+    assert pool.loc[0, "cpt_own"] == 25.0 and pool.loc[0, "proj"] == df.loc[0, "proj"]  # FLEX row's projection
+    lu = solve_showdown(load_player_pool_from(pool, d), pool["proj"].to_numpy())
+    ids = dk.assign_showdown_slots(lu.player_ids, lu.captain_id, pool)
+    dk.validate_showdown_upload(ids, ef.players)
+    assert ids[0] == str(pool.loc[lu.captain_id, "cpt_dk_id"])
+    bad = [str(pool.loc[lu.captain_id, "dk_id"])] + ids[1:]          # FLEX id in the CPT slot
+    with np.testing.assert_raises(ValueError):
+        dk.validate_showdown_upload(bad, ef.players)
+
+
+def test_showdown_pool_to_dk_run_with_sabersim_lineups():
+    df, path, ss_path, d = _showdown_fixture()
+    pool_path = os.path.join(d, "pool.csv")
+    res = subprocess.run([sys.executable, "-W", "ignore", "-m", "dfs_engine.cli", "dk-pool", "--entries", path,
+                          "--projections", ss_path, "--out", pool_path], cwd=ROOT, capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr + res.stdout
+    assert "captain 100%" in res.stdout
+    ef = dk.read_entry_file(path)
+    pool = pd.read_csv(pool_path)
+    flex_of = dict(zip(pool["name"], pool["dk_id"].astype(str)))
+    cpt_of = dict(zip(pool["name"], pool["cpt_dk_id"].astype(str)))
+    names = pool["name"].tolist()
+    saber = os.path.join(d, "lineups_dk_nfl_showdown.csv")
+    with open(saber, "w", newline="") as f:  # SaberSim's lineups export: CPT + 5 FLEX ids, then its metrics
+        w = csv.writer(f)
+        w.writerow(["CPT", "FLEX", "FLEX", "FLEX", "FLEX", "FLEX", "", "Proj Score", "Saber Score"])
+        w.writerow([cpt_of[names[0]], flex_of[names[3]], flex_of[names[7]], flex_of[names[10]],
+                    flex_of[names[5]], flex_of[names[12]], "", 80.0, 50.0])
+    up = os.path.join(d, "upload.csv")
+    res = subprocess.run([sys.executable, "-W", "ignore", "-m", "dfs_engine.cli", "dk-run", "--pool", pool_path,
+                          "--entries", path, "--candidates", "30", "--gen-trials", "200", "--eval-trials", "300",
+                          "--holdout-trials", "200", "--field-size", "1500", "--field-optimizer-solves", "100",
+                          "--min-unique", "1", "--seed", "4", "--upload-out", up, "--extra-lineups", saber,
+                          "--qb-stack", "2", "--max-game-stack-share", "0.5"],
+                         cwd=ROOT, capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr + res.stdout
+    out = res.stdout
+    assert "Showdown: ATL vs NO" in out and "field captains:" in out and "25% of the field" in out
+    assert "Classic only" in out and "+1 of 1 lineups from lineups_dk_nfl_showdown.csv" in out
+    assert out.count("    CPT ") == 2  # each pick printed with its teams
+    with open(up, newline="") as f:
+        rows = list(csv.reader(f))
+    assert rows[0] == dk.ENTRY_COLUMNS + dk.SHOWDOWN_SLOTS and len(rows) == 3
+    for r in rows[1:]:
+        dk.validate_showdown_upload(r[4:10], ef.players)
+    assert rows[1][4:10] != rows[2][4:10]

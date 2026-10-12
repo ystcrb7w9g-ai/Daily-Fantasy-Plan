@@ -274,14 +274,76 @@ def add_locked_candidates(
     return added
 
 
+def satisfies_showdown_rules(df: pd.DataFrame, rows, captain: int, rules: ShowdownRules | None) -> bool:
+    """Whether a Showdown lineup (pool rows incl. the captain) meets `rules` (None = always)."""
+    if rules is None:
+        return True
+    d = df.iloc[list(rows)]
+    pos, team = d["position"].to_numpy(), d["team"].to_numpy()
+    if rules.max_dst is not None and (pos == "DST").sum() > rules.max_dst:
+        return False
+    if rules.max_k is not None and (pos == "K").sum() > rules.max_k:
+        return False
+    for t in np.unique(team):
+        on = team == t
+        if rules.no_same_team_rbs and ((pos == "RB") & on).sum() > 1:
+            return False
+        has_catcher = (np.isin(pos, ("WR", "TE")) & on).any()
+        if rules.qb_needs_catcher and ((pos == "QB") & on).any() and not has_catcher:
+            return False
+    cp = df.iloc[captain]
+    if rules.catcher_cpt_needs_qb and cp["position"] in ("WR", "TE"):
+        if (df["position"].eq("QB") & df["team"].eq(cp["team"])).any() and \
+                not ((pos == "QB") & (team == cp["team"])).any():
+            return False
+    return True
+
+
+def _showdown_from_ids(df, lineups, stack_rules, existing):
+    rule_sets = stack_rules if isinstance(stack_rules, list) else [stack_rules]
+    flex_of = {str(d): i for i, d in enumerate(df["dk_id"].astype(str))}
+    cpt_of = ({str(int(float(d))): i for i, d in enumerate(df["cpt_dk_id"]) if pd.notna(d)}
+              if "cpt_dk_id" in df.columns else {})
+    proj = df["proj"].to_numpy(dtype=float)
+    salary = df["salary"].to_numpy(dtype=int)
+    team = df["team"].to_numpy()
+    seen = {lineup_key(c.player_ids, c.captain_id) for c in (existing or [])}
+    kept, counts = [], {"read": len(lineups), "not_in_pool": 0, "invalid": 0, "breaks_rules": 0, "duplicate": 0}
+    for ids in lineups:
+        cap = cpt_of.get(str(ids[0]), flex_of.get(str(ids[0])))
+        rows = [cap] + [flex_of.get(str(d)) for d in ids[1:]]
+        if any(r is None for r in rows):
+            counts["not_in_pool"] += 1
+            continue
+        sal = int(salary[rows].sum() + 0.5 * salary[cap])
+        if len(set(rows)) != 6 or sal > SALARY_CAP or len(set(team[rows])) < 2:
+            counts["invalid"] += 1
+            continue
+        if not any(satisfies_showdown_rules(df, rows, cap, r) for r in rule_sets):
+            counts["breaks_rules"] += 1
+            continue
+        key = lineup_key(rows, cap)
+        if key in seen:
+            counts["duplicate"] += 1
+            continue
+        seen.add(key)
+        kept.append(LineupResult(sorted(rows), cap, sal, float(proj[rows].sum() + 0.5 * proj[cap])))
+    counts["kept"] = len(kept)
+    return kept, counts
+
+
 def candidates_from_ids(df: pd.DataFrame, lineups: list[list[str]], stack_rules=None,
                         existing: list[LineupResult] | None = None) -> tuple[list[LineupResult], dict]:
     """
-    Classic lineups given as DK player ids (another optimizer's export, e.g.
+    Lineups given as DK player ids (another optimizer's export, e.g.
     SaberSim's) -> candidates over `df` rows. Kept only if every player is
     in the pool (projected) and the lineup meets `stack_rules` (any one of a
     list); duplicates of `existing` are dropped. Returns (kept, counts).
+    Six-id lineups are Showdown: captain first, by its captain id
+    (`cpt_dk_id`) or FLEX id.
     """
+    if lineups and len(lineups[0]) == 6:
+        return _showdown_from_ids(df, lineups, stack_rules, existing)
     from .optimize import satisfies_stack_rules
     rule_sets = stack_rules if isinstance(stack_rules, list) else [stack_rules]
     row_of = {str(d): i for i, d in enumerate(df["dk_id"].astype(str))}
@@ -453,12 +515,14 @@ def structure_rates(field_w: np.ndarray, df: pd.DataFrame) -> dict[str, float]:
     }
 
 
-def _sample_showdown(df, logw, n, rng, min_salary):
-    """Ownership-weighted showdown lineups: (ids (n, 6), captain ids, ok mask)."""
+def _sample_showdown(df, logw, n, rng, min_salary, cpt_logw=None):
+    """Ownership-weighted showdown lineups: (ids (n, 6), captain ids, ok mask). The captain
+    is drawn from `cpt_logw` (captain ownership) when given, else from the FLEX weights."""
     salary = df["salary"].to_numpy(dtype=float)
     all_cols = np.arange(len(df))
     lw = np.broadcast_to(logw, (n, len(df))).copy()
-    cpt = _gumbel_top_k(lw, 1, rng)[:, 0]
+    cpt_lw = lw if cpt_logw is None else np.broadcast_to(cpt_logw, (n, len(df)))
+    cpt = _gumbel_top_k(cpt_lw, 1, rng)[:, 0]
     lw[np.arange(n), cpt] = -np.inf
     flex4 = _gumbel_top_k(lw, 4, rng)
     picked = np.concatenate([cpt[:, None], flex4], axis=1)
@@ -466,6 +530,25 @@ def _sample_showdown(df, logw, n, rng, min_salary):
     last, ok = _fill_last(all_cols, np.broadcast_to(logw, (n, len(df))).copy(),
                           picked, used, salary, min_salary, rng)
     return np.concatenate([picked, last[:, None]], axis=1), cpt, ok
+
+
+def captain_ownership(df: pd.DataFrame) -> np.ndarray | None:
+    """Showdown captain ownership (fraction) from an optional `cpt_own` column, or None.
+    With it, `own` is FLEX ownership (summing to 500%) and `cpt_own` sums to 100%."""
+    if "cpt_own" not in df.columns:
+        return None
+    c = pd.to_numeric(df["cpt_own"], errors="coerce")
+    if not (c > 0).any():
+        return None
+    c = c / 100.0 if c.max() > 1.5 else c
+    return c.fillna(0.0).clip(lower=0.0).to_numpy(dtype=float)
+
+
+def field_shares(field_w: np.ndarray, df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray | None]:
+    """(share of field lineups rostering each player, share captaining him -- None for Classic)."""
+    if not (field_w == 1.5).any():
+        return (field_w > 0).mean(axis=0), None
+    return (field_w == 1.0).mean(axis=0), (field_w == 1.5).mean(axis=0)
 
 
 def _ids_to_weights(ids, captain, n_players):
@@ -486,6 +569,10 @@ DEFAULT_STACK_MIX = (0.148, 0.511, 0.341)
 # exactly $50,000, 85% at $49,800+, 96% at $49,500+, 99% at $49,000+). Each
 # sampled Classic lineup draws its floor from these (floor, share) pairs.
 CLASSIC_SALARY_FLOORS = ((50_000, 0.40), (49_800, 0.40), (49_500, 0.15), (49_000, 0.05))
+# Showdown fields spend a little less (2026 Week 5 SNF, 78k entries: 6% at
+# $50k, 57% at $49.5k+, 76% at $49k+, 93% at $48k+); these floors, with the
+# optimizer slice below, reproduce that.
+SHOWDOWN_SALARY_FLOORS = ((49_500, 0.33), (49_000, 0.27), (48_000, 0.22), (47_000, 0.10), (45_000, 0.08))
 
 # Optimizer slice of the simulated field: share of entries and projection
 # noise chosen so a 165k-entry simulated Milly duplicates like the real
@@ -493,6 +580,14 @@ CLASSIC_SALARY_FLOORS = ((50_000, 0.40), (49_800, 0.40), (49_500, 0.15), (49_000
 # vs 5.7-10.2% and 69-346 in 2026 Weeks 1-3; data/field_profile.json).
 DEFAULT_OPTIMIZER_SHARE = 0.06
 DEFAULT_OPTIMIZER_NOISE = 0.18
+# Showdown fields duplicate far more: in the Week 5 SNF Showdown (78k
+# entries) 94% of entries shared their exact lineup, the top lineup had 415
+# copies, ours 206 and the user's 63. A 25% slice from 2,000 solves (plus
+# captain ownership and the floors above) gives 600-680 / ~160 / 61-70
+# copies and a collision probability of 5.6e-4 (real 5.3e-4); with no slice
+# and captains drawn from FLEX ownership, the field had 22 / 7 / 5.
+SHOWDOWN_OPTIMIZER_SHARE = 0.25
+SHOWDOWN_OPTIMIZER_SOLVES = 2000
 
 # Real Milly field scores at the top 0.1% / top 1% / top 20%, divided by
 # the median score: mean of 2026 Weeks 1-5 (week to week 1.62-1.76 /
@@ -581,11 +676,14 @@ def generate_field(
 
     - Every slot is drawn with probability proportional to a per-player
       weight; the last slot is restricted to players that keep the lineup
-      between a salary floor and the cap. Classic floors are drawn per
-      lineup from `CLASSIC_SALARY_FLOORS` (real fields spend nearly all of
-      it) unless `min_salary` is given; Showdown uses $47,000. If almost no
-      sampled lineup can reach the floor (tiny pools) it is lowered, with a
-      warning.
+      between a salary floor and the cap. Floors are drawn per lineup from
+      `CLASSIC_SALARY_FLOORS` / `SHOWDOWN_SALARY_FLOORS` (real fields spend
+      nearly all of it) unless `min_salary` is given. If almost no sampled
+      lineup can reach the floor (tiny pools) it is lowered, with a warning.
+    - Showdown captains: with a `cpt_own` column (SaberSim's captain rows)
+      captains are drawn from captain ownership and the rest from `own`
+      (then FLEX-only, summing to 500%), each calibrated to its own target.
+      Without it, captains follow `own` like any other slot.
     - Classic stacking: QB teammates' WR/TE get a `stack_boost` sampling
       weight, then lineups are resampled so the shares with 0 / 1 / 2+
       QB-stacked pass catchers match `stack_mix` (None = no resampling).
@@ -603,14 +701,26 @@ def generate_field(
     n_players = len(df)
     # Field ownership must sum to the roster size (900% Classic, 600%
     # Showdown); rescale the targets if they don't, then cap each at 95%
-    # since nobody can be in more than every lineup.
-    roster = 9 if fmt == "classic" else 6
+    # since nobody can be in more than every lineup. With Showdown captain
+    # ownership (`cpt_own`), `own` is FLEX-only (500%) and both are matched:
+    # the targets are then [FLEX shares..., captain shares...].
+    cpt_own = captain_ownership(df) if fmt == "showdown" else None
+    roster = 9 if fmt == "classic" else (5 if cpt_own is not None else 6)
     own = np.clip(df["own"].to_numpy(dtype=float), 1e-4, None)
     if abs(own.sum() / roster - 1.0) > 0.25:
         warnings.warn(f"Projected ownership sums to {own.sum():.0%}, not {roster:.0%}; "
                       "rescaling it for the field.")
     own = np.clip(own * roster / own.sum(), 1e-4, 0.95)
+    if cpt_own is not None:
+        c = np.clip(cpt_own, 1e-4, None)
+        if abs(c.sum() - 1.0) > 0.25:
+            warnings.warn(f"Captain ownership sums to {c.sum():.0%}, not 100%; rescaling it for the field.")
+        own = np.concatenate([own, np.clip(c / c.sum(), 1e-4, 0.95)])
     salary = df["salary"].to_numpy(dtype=float)
+
+    def realized_shares(w):
+        flex, cpt = field_shares(w, df) if cpt_own is not None else ((w > 0).mean(axis=0), None)
+        return flex if cpt_own is None else np.concatenate([flex, cpt])
 
     opt_block = np.zeros((0, n_players), dtype=np.float32)
     if optimizer_share > 0:
@@ -620,7 +730,11 @@ def generate_field(
         opt_block = np.repeat(opt_w, counts, axis=0)
         # The rest of the field gets whatever ownership the slice didn't use.
         share = len(opt_block) / n_field
-        opt_own = (opt_p[:, None] * (opt_w > 0)).sum(axis=0)
+        if cpt_own is None:
+            opt_own = (opt_p[:, None] * (opt_w > 0)).sum(axis=0)
+        else:
+            opt_own = np.concatenate([(opt_p[:, None] * (opt_w == 1.0)).sum(axis=0),
+                                      (opt_p[:, None] * (opt_w == 1.5)).sum(axis=0)])
         own = np.clip((own - share * opt_own) / (1 - share), 1e-4, 0.95)
         n_field = n_field - len(opt_block)
 
@@ -636,6 +750,8 @@ def generate_field(
     def draw(logw, floor):
         if fmt == "classic":
             return _sample_classic(df, logw, batch, rng, stack_boost, floor, boosts)
+        if cpt_own is not None:
+            return _sample_showdown(df, logw[:n_players], batch, rng, floor, cpt_logw=logw[n_players:])
         return _sample_showdown(df, logw, batch, rng, floor)
 
     def update_boosts(sample_w):
@@ -653,11 +769,9 @@ def generate_field(
 
     floors = None
     if min_salary is None:
-        if fmt == "classic":  # real fields spend nearly everything: per-lineup floors
-            floors = CLASSIC_SALARY_FLOORS
-            min_salary = min(f for f, _ in floors)
-        else:
-            min_salary = 47_000
+        # real fields spend nearly everything: per-lineup floors
+        floors = CLASSIC_SALARY_FLOORS if fmt == "classic" else SHOWDOWN_SALARY_FLOORS
+        min_salary = min(f for f, _ in floors)
     ids, cpt, ok = draw(np.log(own), 0)
     probe = _ids_to_weights(ids[ok], None if cpt is None else cpt[ok], n_players) @ salary
     if len(probe) and (probe >= min_salary).mean() < 0.01:
@@ -713,7 +827,7 @@ def generate_field(
         except RuntimeError:
             weights = last_ok
             break
-        realized = (probe_w > 0).mean(axis=0)
+        realized = realized_shares(probe_w)
         if use_structure:
             update_boosts(probe_w)
         last_ok = weights

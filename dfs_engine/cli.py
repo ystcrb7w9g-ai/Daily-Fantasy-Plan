@@ -141,6 +141,8 @@ def _fit_spread(df: pd.DataFrame, field: np.ndarray, args: argparse.Namespace) -
     """Fit default-ceiling width so the field's score spread matches real Millys (unless fixed)."""
     if args.spread_scale is not None or args.no_ceiling_calibration:
         return
+    if getattr(args, "fmt", "classic") == "showdown":
+        return  # the Milly target doesn't apply, and one real Showdown is too few to fit to
     sim = lambda d, n, seed, k: simulate_player_scores(  # noqa: E731
         d, n_trials=n, seed=seed, ceiling_pct=args.ceiling_pct, spread_scale=k, **_sim_knobs(args))
     k, ratios, target = cs.calibrate_spread(df, field, sim)
@@ -327,19 +329,26 @@ def cmd_outcomes(args: argparse.Namespace) -> None:
 
 
 def _optimizer_kwargs(args: argparse.Namespace) -> dict:
-    if args.field_optimizer_share > 0:
-        print(f"  optimizer slice: {args.field_optimizer_share:.0%} of the field from "
-              f"{args.field_optimizer_solves} noisy optimizer solves (duplicates like real Millys)")
-    return {"optimizer_share": args.field_optimizer_share,
-            "optimizer_solves": args.field_optimizer_solves,
-            "optimizer_noise": args.field_optimizer_noise}
+    showdown = getattr(args, "fmt", "classic") == "showdown"
+    share = args.field_optimizer_share
+    if share is None:
+        share = cs.SHOWDOWN_OPTIMIZER_SHARE if showdown else cs.DEFAULT_OPTIMIZER_SHARE
+    solves = args.field_optimizer_solves
+    if solves is None:
+        solves = cs.SHOWDOWN_OPTIMIZER_SOLVES if showdown else 500
+    if share > 0:
+        print(f"  optimizer slice: {share:.0%} of the field from {solves} noisy optimizer solves "
+              f"(duplicates like real {'Showdowns' if showdown else 'Millys'})")
+    return {"optimizer_share": share, "optimizer_solves": solves, "optimizer_noise": args.field_optimizer_noise}
 
 
 def _add_field_optimizer_args(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--field-optimizer-share", type=float, default=cs.DEFAULT_OPTIMIZER_SHARE,
-                   help="share of the field built by noisy optimizer solves, which duplicate "
-                        "like real fields (0 = ownership sampling only)")
-    p.add_argument("--field-optimizer-solves", type=int, default=500)
+    p.add_argument("--field-optimizer-share", type=float, default=None,
+                   help="share of the field built by noisy optimizer solves, which duplicate like real "
+                        f"fields (default {cs.DEFAULT_OPTIMIZER_SHARE:g} Classic / "
+                        f"{cs.SHOWDOWN_OPTIMIZER_SHARE:g} Showdown; 0 = ownership sampling only)")
+    p.add_argument("--field-optimizer-solves", type=int, default=None,
+                   help=f"default 500 Classic / {cs.SHOWDOWN_OPTIMIZER_SOLVES} Showdown")
     p.add_argument("--field-optimizer-noise", type=float, default=cs.DEFAULT_OPTIMIZER_NOISE,
                    help="lognormal sd of projection noise per solve (lower = more duplication)")
 
@@ -443,6 +452,10 @@ def cmd_dk_pool(args: argparse.Namespace) -> None:
     if projections is not None:
         print(f"Read {len(projections)} projection rows; columns used: {', '.join(projections.columns)}")
     pool, unmatched = dk.pool_from_entry_file(ef, projections)
+    showdown = ef.fmt == "showdown"
+    if showdown and (args.week or args.estimate_own or args.own_blend or args.own_sharpen != 1.0):
+        print("Note: --week / --estimate-own / --own-blend / --own-sharpen are Classic models; ignored for Showdown.")
+        args.week, args.estimate_own, args.own_blend, args.own_sharpen = None, False, 0.0, 1.0
     if args.lines:
         pool, no_line = dk.apply_lines(pool, dk.read_lines(args.lines, ef.players))
         print(f"Vegas lines set for {pool['team'].nunique() - len(no_line)} of {pool['team'].nunique()} teams"
@@ -491,7 +504,7 @@ def cmd_dk_pool(args: argparse.Namespace) -> None:
         given = pd.to_numeric(pool["own"], errors="coerce")
         pool["own"] = ownership.sharpen_ownership(given, pool["position"], args.own_sharpen)
         print(f"Sharpened ownership chalk (gamma={args.own_sharpen})")
-    if pool["own"].notna().any():
+    if pool["own"].notna().any() and not showdown:
         for note in ownership.check_ownership(pool[pool["proj"].notna()]):
             print(f"  ownership check: {note}")
     pool.to_csv(args.out, index=False)
@@ -502,7 +515,9 @@ def cmd_dk_pool(args: argparse.Namespace) -> None:
         hit = pool[pool["proj"].notna()]
         print(f"Projections matched for {len(hit)} players "
               f"({', '.join(f'{k} {v}' for k, v in hit['position'].value_counts().items())}).")
-        if hit["own"].notna().any():
+        if hit["own"].notna().any() and showdown:
+            _showdown_ownership_note(hit)
+        elif hit["own"].notna().any():
             own = hit["own"].fillna(0)
             total = own.sum() * (1 if own.max() > 1.5 else 100)
             print(f"  ownership sums to {total:.0f}% (a full DK Classic slate should be ~900%)")
@@ -599,22 +614,63 @@ def _pick_for_contest(df, candidates, result, n, args, exclude=frozenset(), cont
     return chosen
 
 
+def _showdown_ownership_note(df: pd.DataFrame) -> None:
+    flex = pd.to_numeric(df["own"], errors="coerce").fillna(0)
+    flex = flex * (100 if flex.max() <= 1.5 else 1)
+    cpt = cs.captain_ownership(df)
+    if cpt is None:
+        print(f"  ownership sums to {flex.sum():.0f}% (no captain ownership: the field picks captains "
+              "by overall ownership -- SaberSim's export has captain rows; build the pool with dk-pool)")
+        return
+    top = np.argsort(-cpt)[:4]
+    print(f"  ownership: FLEX {flex.sum():.0f}% (should be ~500%), captain {100 * cpt.sum():.0f}% (~100%); "
+          "top captains " + ", ".join(f"{df['name'].iloc[i]} {cpt[i]:.0%}" for i in top))
+
+
+def _showdown_text(df: pd.DataFrame, lu) -> str:
+    """CPT Name (TEAM) | Name (TEAM), ... | ATL 4 / BAL 2"""
+    names, teams = df["name"].to_numpy(), df["team"].to_numpy()
+    flex = [i for i in lu.player_ids if i != lu.captain_id]
+    split = pd.Series(teams[lu.player_ids]).value_counts()
+    return (f"CPT {names[lu.captain_id]} ({teams[lu.captain_id]}) | "
+            + ", ".join(f"{names[i]} ({teams[i]})" for i in flex)
+            + " | " + " / ".join(f"{t} {k}" for t, k in split.items()))
+
+
 def cmd_dk_run(args: argparse.Namespace) -> None:
     ef = dk.read_entry_file(args.entries)
+    args.fmt = ef.fmt
+    showdown = ef.fmt == "showdown"
     df = load_player_pool(args.pool)
-    if "dk_id" not in df.columns or df["dk_id"].isna().any():
-        df, unmatched = dk.attach_dk_ids(df.drop(columns=["dk_id"], errors="ignore"), ef)
+    if "dk_id" not in df.columns or df["dk_id"].isna().any() or (showdown and "cpt_dk_id" not in df.columns):
+        df, unmatched = dk.attach_dk_ids(df.drop(columns=["dk_id", "cpt_dk_id"], errors="ignore"), ef)
         if unmatched:
             print(f"Dropping {len(unmatched)} pool players not on this DK slate: {', '.join(unmatched[:20])}")
         df = df[df["dk_id"].notna()].reset_index(drop=True)
         df["player_id"] = df.index
     df["dk_id"] = pd.to_numeric(df["dk_id"]).astype("int64").astype(str)
-    for note in ownership.check_ownership(df):
-        print(f"ownership check: {note}")
+    if showdown:
+        validate_showdown_pool(df)
+        print(f"Showdown: {' vs '.join(sorted(df['team'].unique()))}")
+        _showdown_ownership_note(df)
+    else:
+        for note in ownership.check_ownership(df):
+            print(f"ownership check: {note}")
     if (df["own"] <= 0).mean() > 0.5:
         print("WARNING: most players have no ownership projection -- the simulated field "
               "(and therefore ROI) will be close to meaningless. Supply `own`.")
-    rules = _stack_rules(args)
+    if showdown:
+        if args.max_game_stack_share is not None:
+            print("Note: --max-game-stack-share is Classic only (every Showdown lineup is one game); ignoring.")
+            args.max_game_stack_share = None
+        _stack_rules(args)  # prints a note if Classic stacking flags were given
+        rules = _showdown_rules(args)
+        if rules is not None:
+            print(f"Showdown rules ({args.showdown_rules}): a QB comes with one of his WR/TE, a WR/TE captain "
+                  "with his QB, at most one DST, no two RBs from a team"
+                  + (" (except in some candidates)" if args.showdown_rules == "soft" else ""))
+    else:
+        rules = _stack_rules(args)
     contests = pd.read_csv(args.contests) if args.contests else dk.estimate_contests(ef.entries)
     contests["contest_id"] = contests["contest_id"].astype(str)
     total = int(contests["our_entries"].sum())
@@ -632,9 +688,13 @@ def cmd_dk_run(args: argparse.Namespace) -> None:
     seed = args.seed
     sub_seed = (lambda k: None) if seed is None else (lambda k: seed + k)
     print(f"Sampling a {args.field_size:,}-lineup field from ownership...")
-    field = cs.generate_field(df, args.field_size, min_salary=args.field_min_salary,
+    field = cs.generate_field(df, args.field_size, fmt=args.fmt, min_salary=args.field_min_salary,
                               stack_mix=_parse_stack_mix(args.field_stack_mix), seed=sub_seed(2),
                               **_optimizer_kwargs(args))
+    if showdown:
+        flex_share, cpt_share = cs.field_shares(field, df)
+        top = np.argsort(-cpt_share)[:4]
+        print("  field captains: " + ", ".join(f"{df['name'].iloc[i]} {cpt_share[i]:.0%}" for i in top))
     _fit_spread(df, field, args)
 
     print(f"Simulating {args.gen_trials} + {args.eval_trials} + {args.holdout_trials} trials...")
@@ -644,17 +704,21 @@ def cmd_dk_run(args: argparse.Namespace) -> None:
 
     n_cand = max(args.candidates, 3 * total)
     print(f"Generating {n_cand} candidate lineups...")
-    candidates = cs.generate_candidates(df, gen_scores, n_cand, stack_rules=rules,
+    candidates = cs.generate_candidates(df, gen_scores, n_cand, fmt=args.fmt, stack_rules=rules,
                                         seed=seed, progress=True, excluded_ids=banned or None)
     need_min = np.flatnonzero(min_exp > 0)
     if len(need_min):
         n_each = max(10, int(np.ceil(2 * min_exp[need_min].max() * total)))
-        added = cs.add_locked_candidates(df, gen_scores, candidates, need_min, n_each, stack_rules=rules,
-                                         seed=seed, excluded_ids=banned or None)
+        added = cs.add_locked_candidates(df, gen_scores, candidates, need_min, n_each, fmt=args.fmt,
+                                         stack_rules=rules, seed=seed, excluded_ids=banned or None)
         print(f"  +{added} candidates built around the {len(need_min)} min-exposure players")
     extra_rows: dict[str, set[int]] = {}
     for path in args.extra_lineups:
-        kept, n = cs.candidates_from_ids(df, dk.read_lineup_file(path), stack_rules=rules, existing=candidates)
+        lineups = dk.read_lineup_file(path)
+        if lineups and len(lineups[0]) != (6 if showdown else 9):
+            raise SystemExit(f"{path} holds {'Classic' if len(lineups[0]) == 9 else 'Showdown'} lineups; "
+                             f"this entry file is {args.fmt.title()}")
+        kept, n = cs.candidates_from_ids(df, lineups, stack_rules=rules, existing=candidates)
         n_banned = sum(bool(banned & set(lu.player_ids)) for lu in kept)
         kept = [lu for lu in kept if not banned & set(lu.player_ids)]
         extra_rows[os.path.basename(path)] = set(range(len(candidates), len(candidates) + len(kept)))
@@ -694,15 +758,25 @@ def cmd_dk_run(args: argparse.Namespace) -> None:
         entry_ids = ef.entries.loc[ef.entries["contest_id"] == row["contest_id"], "entry_id"].tolist()
         for entry_id, ci in zip(entry_ids, chosen):
             lu = candidates[ci]
-            ids = dk.assign_slots(lu.player_ids, df)
-            dk.validate_upload_lineup(ids, ef.players)
+            if showdown:
+                ids = dk.assign_showdown_slots(lu.player_ids, lu.captain_id, df)
+                dk.validate_showdown_upload(ids, ef.players)
+                order = [lu.captain_id] + [i for i in lu.player_ids if i != lu.captain_id]
+                names, labels = df["name"].iloc[order].tolist(), dk.SHOWDOWN_REPORT_LABELS
+            else:
+                ids = dk.assign_slots(lu.player_ids, df)
+                dk.validate_upload_lineup(ids, ef.players)
+                names, labels = df.set_index("dk_id").loc[ids, "name"].tolist(), dk.REPORT_SLOT_LABELS
             slot_ids[entry_id] = ids
             used.append(lu)
-            names = df.set_index("dk_id").loc[ids, "name"].tolist()
             m = result.metrics.iloc[ci]
+            if showdown:
+                print(f"    {_showdown_text(df, lu)} | ${lu.salary_used:,} | proj {lu.projected_points:.1f} | "
+                      f"top-1% {m['top1_pct']:.1%} (holdout {hold.metrics.iloc[ci]['top1_pct']:.1%}) | "
+                      f"~{m['exp_dupes']:.0f} expected copies")
             report_rows.append({
                 "entry_id": entry_id, "contest": row["contest_name"],
-                **dict(zip(dk.REPORT_SLOT_LABELS, names)),
+                **dict(zip(labels, names)),
                 "salary": lu.salary_used, "proj": round(lu.projected_points, 2),
                 "roi": round(m["roi"], 4), "top1_pct": round(m["top1_pct"], 4),
                 "holdout_roi": round(hold.metrics.iloc[ci]["roi"], 4),
@@ -734,6 +808,8 @@ def _now_eastern(text: str | None) -> pd.Timestamp:
 def cmd_dk_late_swap(args: argparse.Namespace) -> None:
     from . import lateswap as ls
     ef = dk.read_entry_file(args.entries)
+    if ef.fmt != "classic":
+        raise SystemExit("dk-late-swap handles Classic entry files only (a Showdown locks all at once)")
     df = load_player_pool(args.pool)
     if "dk_id" not in df.columns or "game_time" not in df.columns or df["dk_id"].isna().any():
         df, _ = dk.attach_dk_ids(df.drop(columns=["dk_id", "game_time"], errors="ignore"), ef)
@@ -1278,7 +1354,10 @@ def main() -> None:
     p_dkr.add_argument("--upload-out", required=True)
     p_dkr.add_argument("--report-out", default=None)
     p_dkr.add_argument("--exposure-out", default=None)
-    p_dkr.add_argument("--fmt", default="classic", help=argparse.SUPPRESS)
+    p_dkr.add_argument("--fmt", default="classic", help=argparse.SUPPRESS)  # set from the entry file
+    p_dkr.add_argument("--showdown-rules", choices=["soft", "strict", "off"], default="soft",
+                       help="Showdown entry files: correlation rules (soft = strict plus some same-team "
+                            "RB pairs, played sparingly)")
     p_dkr.add_argument("--extra-lineups", action="append", default=[], metavar="FILE",
                        help="DK-format lineups added to the candidate pool (e.g. SaberSim's entries export, "
                             "an old upload); kept if they meet the stack rules, played only where the contest "

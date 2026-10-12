@@ -290,6 +290,57 @@ def test_soft_showdown_rules_add_rb_pairs_and_share_cap_limits_them():
     assert len(chosen) > 0 and sum(pairs[i] for i in chosen) <= 2
 
 
+def test_showdown_field_matches_captain_and_flex_ownership_separately():
+    df = _showdown_pool()
+    cpt = np.full(len(df), 0.70 / 12)
+    cpt[[0, 7]] = [0.25, 0.05]          # ATL QB the chalk captain; NO QB rarely captained
+    df["cpt_own"] = cpt
+    df["own"] = 5 / 14                  # FLEX-only ownership (500%)
+    field = cs.generate_field(df, 6000, fmt="showdown", seed=44, min_salary=40_000)
+    flex, captain = cs.field_shares(field, df)
+    assert np.abs(captain - df["cpt_own"]).max() < 0.03
+    assert np.abs(flex - df["own"]).max() < 0.05
+    assert captain[0] > 3 * captain[7]
+    plain = cs.generate_field(df.drop(columns="cpt_own"), 6000, fmt="showdown", seed=44, min_salary=40_000)
+    assert cs.field_shares(plain, df)[1][0] < 0.15  # without it captains just follow overall ownership
+
+
+def test_showdown_field_spends_like_real_fields_and_slice_adds_duplicates():
+    from collections import Counter
+    df = _showdown_pool()
+    sal = df["salary"].to_numpy(dtype=float)
+    field = cs.generate_field(df, 4000, fmt="showdown", seed=45)
+    spent = field @ sal
+    assert (spent >= 49_500).mean() > 0.25 and (spent >= 45_000).all()
+    top = lambda f: max(Counter(map(bytes, (2 * f).astype(np.uint8))).values())  # noqa: E731  (captain-aware)
+    sliced = cs.generate_field(df, 4000, fmt="showdown", seed=45, optimizer_share=cs.SHOWDOWN_OPTIMIZER_SHARE,
+                               optimizer_solves=200)
+    assert top(sliced) > 1.5 * top(field)  # the optimizer's favorite builds pile up, as in real Showdowns
+
+
+def test_candidates_from_ids_reads_showdown_lineups_by_captain_id():
+    df = _showdown_pool()
+    df["dk_id"] = (5000 + df.index).astype(str)
+    df["cpt_dk_id"] = 6000 + df.index
+    ix = {n: i for i, n in enumerate(df["name"])}
+    cid = lambda n: str(6000 + ix[n])  # noqa: E731
+    fid = lambda n: str(5000 + ix[n])  # noqa: E731
+    good = [cid("ATL QB10000"), fid("ATL WR8000"), fid("NO QB10000"), fid("NO WR8000"), fid("ATL RB4000"), fid("NO TE4000")]
+    one_team = [cid("ATL QB10000"), fid("ATL WR8000"), fid("ATL WR5000"), fid("ATL TE4000"), fid("ATL RB4000"),
+                fid("ATL DST3500")]
+    lonely_qb = [cid("NO RB9000"), fid("ATL QB10000"), fid("ATL RB4000"), fid("NO WR5000"), fid("NO TE4000"),
+                 fid("NO DST3500")]
+    rules = cs.soft_showdown_rules()
+    kept, n = cs.candidates_from_ids(df, [good, good, one_team, lonely_qb, ["1"] + good[1:]], stack_rules=rules)
+    assert n["kept"] == 1 and n["duplicate"] == 1 and n["invalid"] == 1 and n["breaks_rules"] == 1
+    assert n["not_in_pool"] == 1
+    lu = kept[0]
+    assert df["name"].iloc[lu.captain_id] == "ATL QB10000" and len(lu.player_ids) == 6
+    assert lu.salary_used == 15000 + 8000 + 10000 + 8000 + 4000 + 4000
+    w = cs.lineups_to_weights(kept, len(df))
+    assert w[0, ix["ATL QB10000"]] == 1.5 and w[0].sum() == 6.5
+
+
 def test_emax_objective_starts_at_best_ev_and_grows_best_entry_payout():
     df, cands, res = _graded()
     chosen = cs.select_portfolio(df, cands, res, 6, objective="emax", min_unique=1)

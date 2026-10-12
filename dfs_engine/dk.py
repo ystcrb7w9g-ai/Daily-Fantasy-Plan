@@ -1,10 +1,12 @@
 """
-DraftKings entry-file support (Classic).
+DraftKings entry-file support (Classic and Showdown).
 
 DraftKings' "Edit Entries" download (DKEntries.csv) holds two things:
 
 * your entries -- `Entry ID, Contest Name, Contest ID, Entry Fee` followed
-  by one column per roster slot (QB, RB, RB, WR, WR, WR, TE, FLEX, DST);
+  by one column per roster slot (QB, RB, RB, WR, WR, WR, TE, FLEX, DST; or
+  CPT + 5 FLEX for Showdown, where every player is listed twice: a CPT row
+  with its own ID at 1.5x salary, and a FLEX row);
 * the slate's full player list, embedded to the right of the entries
   (`Position, Name + ID, Name, ID, Roster Position, Salary, Game Info,
   TeamAbbrev, AvgPointsPerGame`).
@@ -27,7 +29,10 @@ import pandas as pd
 from .sportsgameodds import normalize_abbr, normalize_name
 
 CLASSIC_SLOTS = ["QB", "RB", "RB", "WR", "WR", "WR", "TE", "FLEX", "DST"]
+SHOWDOWN_SLOTS = ["CPT", "FLEX", "FLEX", "FLEX", "FLEX", "FLEX"]
 REPORT_SLOT_LABELS = ["QB", "RB1", "RB2", "WR1", "WR2", "WR3", "TE", "FLEX", "DST"]
+SHOWDOWN_REPORT_LABELS = ["CPT", "FLEX1", "FLEX2", "FLEX3", "FLEX4", "FLEX5"]
+CAPTAIN_POSITIONS = ("CPT", "CAPTAIN")
 ENTRY_COLUMNS = ["Entry ID", "Contest Name", "Contest ID", "Entry Fee"]
 BASE_COUNTS = {"RB": 2, "WR": 3, "TE": 1}
 
@@ -43,6 +48,10 @@ class DKEntryFile:
     slots: list[str]           # roster-slot column names, e.g. CLASSIC_SLOTS
     entries: pd.DataFrame      # entry_id, contest_name, contest_id, entry_fee, + raw strings
     players: pd.DataFrame      # dk_id, name, position, roster_position, salary, team, opp, game, game_time, avg_ppg
+
+    @property
+    def fmt(self) -> str:
+        return "showdown" if self.slots == SHOWDOWN_SLOTS else "classic"
 
 
 def _money(text: str) -> float:
@@ -63,8 +72,9 @@ def read_entry_file(path: str) -> DKEntryFile:
         if not col.strip():
             break
         slots.append(col.strip())
-    if slots != CLASSIC_SLOTS:
-        raise ValueError(f"Only NFL Classic entry files are supported (slots: {slots})")
+    slots = ["CPT" if s.upper() in CAPTAIN_POSITIONS else s.upper() for s in slots]
+    if slots not in (CLASSIC_SLOTS, SHOWDOWN_SLOTS):
+        raise ValueError(f"Only NFL Classic and Showdown entry files are supported (slots: {slots})")
 
     entries = []
     for r in rows[1:]:
@@ -329,15 +339,27 @@ def pool_from_entry_file(ef: DKEntryFile, projections: pd.DataFrame | None = Non
     from `projections`). Vegas-line columns are left blank for sgo-enrich.
     """
     p = ef.players
+    showdown = ef.fmt == "showdown"
+    if showdown:  # one pool row per player (his FLEX row); his captain row's ID rides along
+        rp = p["roster_position"].astype(str).str.upper()
+        cpt_rows = p[rp.isin(CAPTAIN_POSITIONS)]
+        p = p[rp == "FLEX"].reset_index(drop=True)
+        key = lambda d: d["name"].map(normalize_name) + "|" + d["team"]  # noqa: E731
+        cpt_id = dict(zip(key(cpt_rows), cpt_rows["dk_id"].astype(str)))
     pool = pd.DataFrame({
         "name": p["name"], "team": p["team"], "opp": p["opp"], "position": p["position"],
         "salary": p["salary"], "proj": np.nan, "own": np.nan, "ceiling": np.nan,
         "team_total": np.nan, "game_total": np.nan, "spread": np.nan,
         "dk_id": p["dk_id"], "game_time": p["game_time"], "avg_ppg": p["avg_ppg"],
     })[POOL_COLUMNS]
+    if showdown:
+        pool["cpt_dk_id"] = key(p).map(cpt_id).to_numpy()
+        pool["cpt_own"] = np.nan
     unmatched: list[str] = []
     if projections is not None:
         proj = standardize_projection_columns(projections)
+        if showdown:
+            proj, proj_cpt = _split_captain_rows(proj, set(cpt_id.values()))
         idx = match_players(proj, p)
         if "dk_id" in proj.columns:  # exact DK ID match where the source has one (SaberSim)
             by_id = pd.Series(p.index, index=p["dk_id"].astype(str))
@@ -355,24 +377,54 @@ def pool_from_entry_file(ef: DKEntryFile, projections: pd.DataFrame | None = Non
             for col in ("team_total", "game_total"):
                 pool[col] = pool.groupby("team")[col].transform("first")
             pool["spread"] = pool["game_total"] - 2 * pool["team_total"]  # favourite negative
+        if showdown and len(proj_cpt) and "own" in proj_cpt.columns:
+            row_of_cpt = pd.Series(pool.index, index=pool["cpt_dk_id"].astype(str))
+            cidx = (proj_cpt["dk_id"].astype(str).map(row_of_cpt) if "dk_id" in proj_cpt.columns
+                    else pd.Series(np.nan, index=proj_cpt.index)).astype(float)
+            cidx = cidx.where(cidx.notna(), match_players(proj_cpt, p))
+            hit = cidx.notna()
+            pool.loc[cidx[hit].astype(int).to_numpy(), "cpt_own"] = \
+                pd.to_numeric(proj_cpt["own"], errors="coerce")[hit].to_numpy()
+            pool.loc[pool["proj"].isna(), "cpt_own"] = np.nan
     return pool, unmatched
+
+
+def _split_captain_rows(proj: pd.DataFrame, cpt_ids: set[str]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Showdown projections -> (FLEX rows, captain rows). SaberSim lists each
+    player twice; its captain rows carry the DK captain IDs. Without IDs, a
+    player's second, pricier row is his captain row.
+    """
+    is_cpt = proj["dk_id"].astype(str).isin(cpt_ids) if "dk_id" in proj.columns \
+        else pd.Series(False, index=proj.index)
+    if not is_cpt.any() and "salary" in proj.columns:
+        k = proj["name"].map(normalize_name) + "|" + (proj["team"].astype(str) if "team" in proj.columns else "")
+        twice = k.map(k.value_counts()) == 2
+        is_cpt = twice & (proj["salary"] > proj.groupby(k)["salary"].transform("min"))
+    return proj[~is_cpt], proj[is_cpt]
 
 
 def read_lineup_file(path: str) -> list[list[str]]:
     """
-    Classic lineups as DK player-id lists from any DK-layout file: an upload
-    file, a DKEntries download, or another optimizer's export (SaberSim's
-    entries file). The nine slot columns start at the first `QB` header;
-    cells may be ids or "Name (id)". Rows without nine ids are skipped.
+    Lineups as DK player-id lists from any DK-layout file: an upload file, a
+    DKEntries download, or another optimizer's export (SaberSim's entries or
+    lineups file). Classic: the nine slot columns start at the first `QB`
+    header. Showdown: six, starting at `CPT` (captain ID first). Cells may be
+    ids or "Name (id)". Rows without a full set of ids are skipped.
     """
     with open(path, newline="", encoding="utf-8-sig") as f:
         rows = list(csv.reader(f))
-    if not rows or "QB" not in [h.strip() for h in rows[0]]:
-        raise ValueError(f"{path}: no QB column in the header -- expected DK lineup slots {CLASSIC_SLOTS}")
-    start = [h.strip() for h in rows[0]].index("QB")
+    head = [h.strip().upper() for h in rows[0]] if rows else []
+    if "QB" in head:
+        start, width = head.index("QB"), 9
+    elif "CPT" in head or "CAPTAIN" in head:
+        start, width = head.index("CPT" if "CPT" in head else "CAPTAIN"), 6
+    else:
+        raise ValueError(f"{path}: no QB or CPT column in the header -- expected DK lineup slots "
+                         f"{CLASSIC_SLOTS} or {SHOWDOWN_SLOTS}")
     out = []
     for r in rows[1:]:
-        cells = (r + [""] * 9)[start:start + 9]
+        cells = (r + [""] * width)[start:start + width]
         ids = [m.group(1) if (m := re.search(r"(\d{4,})\)?\s*$", c.strip())) else None for c in cells]
         if all(ids):
             out.append(ids)
@@ -380,15 +432,26 @@ def read_lineup_file(path: str) -> list[list[str]]:
 
 
 def attach_dk_ids(pool: pd.DataFrame, ef: DKEntryFile) -> tuple[pd.DataFrame, list[str]]:
-    """Add `dk_id` / `game_time` to a pool that lacks them; returns (pool, unmatched names)."""
-    idx = match_players(pool, ef.players)
+    """Add `dk_id` / `game_time` (and Showdown `cpt_dk_id`) to a pool that lacks them;
+    returns (pool, unmatched names)."""
+    players = ef.players
+    if ef.fmt == "showdown":
+        rp = players["roster_position"].astype(str).str.upper()
+        cpt_rows, players = players[rp.isin(CAPTAIN_POSITIONS)], players[rp == "FLEX"]
+    idx = match_players(pool, players)
     out = pool.copy()
     hit = idx.notna()
     out["dk_id"] = None
-    out.loc[hit, "dk_id"] = ef.players.loc[idx[hit].astype(int), "dk_id"].to_numpy()
+    out.loc[hit, "dk_id"] = players.loc[idx[hit].astype(int), "dk_id"].to_numpy()
     if "game_time" not in out.columns:
         out["game_time"] = pd.NaT
-        out.loc[hit, "game_time"] = ef.players.loc[idx[hit].astype(int), "game_time"].to_numpy()
+        out.loc[hit, "game_time"] = players.loc[idx[hit].astype(int), "game_time"].to_numpy()
+    if ef.fmt == "showdown":
+        key = lambda d: d["name"].map(normalize_name) + "|" + d["team"]  # noqa: E731
+        cpt_id = dict(zip(key(cpt_rows), cpt_rows["dk_id"].astype(str)))
+        flex = players.loc[idx[hit].astype(int)]
+        out["cpt_dk_id"] = None
+        out.loc[hit, "cpt_dk_id"] = key(flex).map(cpt_id).to_numpy()
     return out, out.loc[~hit, "name"].astype(str).tolist()
 
 
@@ -459,6 +522,30 @@ def assign_slots(player_ids: list[int], pool: pd.DataFrame) -> list[str]:
     by_pos[extra[0]] = flex_group[:-1]
     order = by_pos["QB"] + by_pos["RB"] + by_pos["WR"] + by_pos["TE"] + [flex] + by_pos["DST"]
     return [str(pool.at[i, "dk_id"]) for i in order]
+
+
+def assign_showdown_slots(player_ids: list[int], captain_id: int, pool: pd.DataFrame) -> list[str]:
+    """DK IDs in Showdown slot order: the captain's CPT-row ID, then the five FLEX IDs."""
+    if "cpt_dk_id" not in pool.columns or pd.isna(pool.at[captain_id, "cpt_dk_id"]):
+        raise ValueError(f"No captain ID for {pool.at[captain_id, 'name']} -- build the pool with dk-pool")
+    flex = [i for i in player_ids if i != captain_id]
+    return [str(int(float(pool.at[captain_id, "cpt_dk_id"])))] + [str(pool.at[i, "dk_id"]) for i in flex]
+
+
+def validate_showdown_upload(ids: list[str], players: pd.DataFrame, salary_cap: int = 50_000) -> None:
+    """Re-check a finished Showdown lineup against DK's rules using the DK player list."""
+    if len(ids) != 6 or len(set(ids)) != 6:
+        raise ValueError("Showdown lineup needs 6 distinct player IDs")
+    p = players.set_index("dk_id").loc[ids]
+    rp = p["roster_position"].astype(str).str.upper()
+    if rp.iloc[0] not in CAPTAIN_POSITIONS or not (rp.iloc[1:] == "FLEX").all():
+        raise ValueError("Showdown lineup must be one CPT ID then five FLEX IDs")
+    if (p["name"] + "|" + p["team"]).duplicated().any():
+        raise ValueError("A player can't be both captain and FLEX")
+    if p["salary"].sum() > salary_cap:
+        raise ValueError(f"Salary {p['salary'].sum()} over cap")
+    if p["team"].nunique() < 2:
+        raise ValueError("Showdown lineups need players from both teams")
 
 
 def write_upload(ef: DKEntryFile, slot_ids: dict[str, list[str]], path: str) -> int:

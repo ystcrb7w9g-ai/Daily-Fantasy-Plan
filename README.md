@@ -392,7 +392,7 @@ Then upload `dk_upload.csv` on DraftKings' Edit Entries page.
   `payouts_file` to a `rank_min,rank_max,payout` CSV.
 - **The upload file** uses player IDs only (as DraftKings asks) and copies
   the entry columns verbatim. Every lineup is re-checked against DK's
-  Classic rules: salary, slots, and at least 2 games.
+  Classic rules: salary, slots, and at least 2 games (Showdown: see below).
 - **FLEX for late swap.** FLEX holds the latest-kickoff player of the
   position with an extra body, which keeps late-swap options open.
 - **Reusing lineups across contests.** By default each contest takes its
@@ -515,6 +515,72 @@ ours is 0). SaberSim percentiles fix the marginal shapes when you have them.
 On Week 5 they were the best-calibrated shapes we have: RMS 0.034 across
 p5-p99, vs 0.055 for our own. Default curves fit to Weeks 1-4 did worse out
 of sample (0.104), so none ship.
+
+### Showdown entry files (`dk-pool` / `dk-run` on a single game)
+
+The same `dk-pool` → `dk-run` steps work on a DraftKings **Showdown**
+`DKEntries.csv` (CPT + 5 FLEX). The format is read from the file:
+
+```bash
+python -m dfs_engine.cli dk-pool --entries DKEntries.csv \
+    --projections NFL_..._DK_SHOWDOWN_NO--ATL.csv --out sd_pool.csv
+python -m dfs_engine.cli dk-run --pool sd_pool.csv --entries DKEntries.csv \
+    --extra-lineups lineups_dk_nfl_showdown_....csv --eval-trials 20000 --holdout-trials 10000 \
+    --upload-out sd_upload.csv --report-out sd_report.csv
+```
+
+- **Captain rows.** DraftKings lists every player twice, as a CPT row
+  (its own ID, 1.5x salary) and a FLEX row. SaberSim's export does the
+  same, each row with its own ownership. The pool keeps one row per
+  player: projection, percentiles and `own` (FLEX ownership, ~500%) come
+  from the FLEX row; `cpt_own` (~100%) and `cpt_dk_id` from the CPT row.
+  The upload puts the captain's CPT ID first and is re-checked against
+  DK's rules: CPT + 5 FLEX IDs, one player per slot, salary, both teams.
+- **The field picks captains by captain ownership.** Before, captains
+  were drawn by overall ownership. In the Week 5 SNF Showdown that made
+  Bijan a 12% captain in our field, when SaberSim projected 26% and he
+  was really 33%. That made our Bijan-captain lineup look far less
+  popular than it was.
+- **Duplication like a real Showdown.** 25% of the field comes from
+  2,000 noisy optimizer solves (Classic: 6% from 500), and salary floors
+  follow real Showdown spending. On Week 5 SNF (78k entries):
+
+  | per 78k entries | real | old field | field now |
+  |---|---|---|---|
+  | copies of the most-played lineup | 415 | 22 | 600-680 |
+  | copies of our entry / yours | 206 / 63 | 7 / 5 | ~160 / 61-70 |
+  | duplication concentration (collision prob. x1e4) | 5.3 | 0.5 | 5.6-5.7 |
+  | lineups at $49.5k+ / $48k+ | 57% / 93% | 9% / 31% | 59% / 91% |
+  | captain share: Bijan / London / Huntley | 33 / 17 / 6% | 12 / 11 / 12% | 26 / 20 / 9% |
+
+  (The field's captain shares follow SaberSim's captain projections,
+  26 / 20 / 9%. Two seeds each.)
+
+- **Rules.** `--showdown-rules soft` (default): a QB needs one of his
+  WR/TE, a WR/TE captain needs his QB, at most one DST, and no two RBs
+  from one team, except in a share of candidates (capped at 20% of
+  picks). Classic stacking flags and `--max-game-stack-share` are
+  ignored, with a note. Each pick is printed with its team split and
+  expected copies.
+- **`--extra-lineups`** takes SaberSim's Showdown lineups export (CPT +
+  5 FLEX IDs) or any DK Showdown upload. Those lineups join the
+  candidate pool and are played only where our contest sim prefers them.
+- **Use 20,000+ evaluation sims for a single entry.** With 5,000, the
+  top candidates' top-1% rates (~2.8%) sit within noise of each other,
+  and different seeds pick different lineups.
+
+Replay of Week 5 SNF with the same SaberSim inputs. Hindsight on one
+game, so it says the field now behaves sensibly, not that the edge is
+proven:
+
+| lineup | points | finish of 78,431 | copies: sim expected / real |
+|---|---|---|---|
+| old engine (entered Sunday): CPT Bijan, London, Penix, Folk, ATL DST, J. Hill | 92.7 | 30,890 (top 39%) | ~7 (old field) / 204 |
+| SaberSim's 2nd-best SaberScore (entered) | 103.2 | 6,522 (top 8%) | 61-70 / 63 |
+| new engine, 3 of 4 runs (incl. 20k sims): CPT Flowers, Bijan, Huntley, Folk, Loop, ATL DST | 98.7 | 15,079 (top 19%) | 39-51 / 42 |
+| new engine, 1 run (5k sims): CPT Huntley, Henry, Flowers, Andrews, Folk, ATL DST | 103.5 | 6,149 (top 8%) | ~4 / 3 |
+
+The expected copies printed for each pick tracked the real field's.
 
 ### Late swap (`dk-late-swap`)
 
@@ -913,7 +979,7 @@ dfs_engine/
   optimize.py     # MILP solver (Classic + Showdown, DK game/team rules) + stacking rules
   outcomes.py     # per-player median/p85/p99/boom/bust/Optimal% report
   contest.py      # candidates, ownership-sampled field, contest sim, portfolio selection
-  dk.py           # DraftKings entry file: parse, pool + projections merge, slots, upload
+  dk.py           # DraftKings entry file (Classic + Showdown): parse, pool + projections merge, slots, upload
   history.py      # contest-standings exports -> field profile (score spread, stacks, ownership)
   ownership.py    # ownership sanity checks + fallback estimator from real-field curves
   portfolio.py    # N-lineup portfolio builder (exposure caps, uniqueness)
