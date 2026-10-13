@@ -198,6 +198,10 @@ def _add_portfolio_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--max-rb-pair-share", type=float, default=None,
                    help="max share of lineups with two RBs from one team (default 0.2 with "
                         "--showdown-rules soft, otherwise no cap)")
+    p.add_argument("--ceiling-weight", type=float, default=None,
+                   help="blend objective: weight on how often a lineup is the best candidate in a sim "
+                        "(field-free ceiling) vs its top-1%% chance against the field; 0 = top1, 1 = "
+                        f"ceiling (default {cs.DEFAULT_CEILING_WEIGHT})")
 
 
 def _add_exposure_args(p: argparse.ArgumentParser) -> None:
@@ -250,7 +254,18 @@ def _showdown_rules(args: argparse.Namespace):
         return ShowdownRules()
     if mode == "soft":
         return cs.soft_showdown_rules()
+    if mode == "light":
+        return cs.LIGHT_SHOWDOWN_RULES
     return None
+
+
+SHOWDOWN_RULES_TEXT = {
+    "light": "at most one DST; stacks come from the sims",
+    "soft": "a QB comes with one of his WR/TE, a WR/TE captain with his QB, at most one DST, "
+            "no two RBs from a team (except in some candidates)",
+    "strict": "a QB comes with one of his WR/TE, a WR/TE captain with his QB, at most one DST, "
+              "no two RBs from a team",
+}
 
 
 def cmd_build(args: argparse.Namespace) -> None:
@@ -408,7 +423,7 @@ def cmd_contest(args: argparse.Namespace) -> None:
 
     chosen = _pick_for_contest(df, candidates, result, args.n_lineups, args, contest_size=payout.contest_size)
     print(f"Selected {len(chosen)}/{args.n_lineups} lineups "
-          f"(objective={_objective(args, payout.contest_size)}).")
+          f"(objective={_objective_text(args, payout.contest_size)}).")
 
     # Re-grade the chosen lineups on fresh sims: selecting the best of
     # thousands on one sim set overstates them (winner's curse).
@@ -595,9 +610,20 @@ def _objective(args: argparse.Namespace, contest_size: int) -> str:
     return "top1" if contest_size >= AUTO_TOP1_SIZE else "roi"
 
 
+def _ceiling_weight(args: argparse.Namespace) -> float:
+    w = getattr(args, "ceiling_weight", None)
+    return cs.DEFAULT_CEILING_WEIGHT if w is None else w
+
+
+def _objective_text(args: argparse.Namespace, contest_size: int) -> str:
+    obj = _objective(args, contest_size)
+    return f"blend, ceiling weight {_ceiling_weight(args):g}" if obj == "blend" else obj
+
+
 def _pick_for_contest(df, candidates, result, n, args, exclude=frozenset(), contest_size=None) -> list[int]:
     kw = _portfolio_kwargs(args)
     objective = _objective(args, contest_size or 0)
+    kw["ceiling_weight"] = _ceiling_weight(args)
     chosen = cs.select_portfolio(
         df, candidates, result, n, objective=objective, min_unique=args.min_unique,
         dst_cap=args.dst_cap, max_exposure=args.max_exposure, exclude=set(exclude), **kw,
@@ -606,7 +632,7 @@ def _pick_for_contest(df, candidates, result, n, args, exclude=frozenset(), cont
         more = cs.select_portfolio(
             df, candidates, result, n - len(chosen), objective=objective, min_unique=1,
             dst_cap=1.0, max_exposure=1.0, tiered_caps=False, exclude=set(chosen) | set(exclude),
-            **kw,  # keep the punt / RB-pair / game-stack share caps
+            **kw,  # keep the punt / RB-pair / game-stack share caps and the ceiling weight
         )
         print(f"  note: only {len(chosen)} lineups fit the exposure/uniqueness rules; "
               f"filled {len(more)} more with relaxed rules")
@@ -666,9 +692,7 @@ def cmd_dk_run(args: argparse.Namespace) -> None:
         _stack_rules(args)  # prints a note if Classic stacking flags were given
         rules = _showdown_rules(args)
         if rules is not None:
-            print(f"Showdown rules ({args.showdown_rules}): a QB comes with one of his WR/TE, a WR/TE captain "
-                  "with his QB, at most one DST, no two RBs from a team"
-                  + (" (except in some candidates)" if args.showdown_rules == "soft" else ""))
+            print(f"Showdown rules ({args.showdown_rules}): {SHOWDOWN_RULES_TEXT[args.showdown_rules]}")
     else:
         rules = _stack_rules(args)
     contests = pd.read_csv(args.contests) if args.contests else dk.estimate_contests(ef.entries)
@@ -753,7 +777,8 @@ def cmd_dk_run(args: argparse.Namespace) -> None:
         summ = cs.portfolio_summary(hold, chosen, payout.entry_fee)
         roi_txt = f"ROI {summ['roi']:+.0%}" if payout.entry_fee > 0 else f"exp payout ${summ['exp_payout']:.2f}"
         print(f"{row['contest_name'][:48]:<48} {n:>3} entries  size {payout.contest_size:>7,}  "
-              f"holdout {roi_txt}, P(any top-1%) {summ['p_any_top1']:.0%}")
+              f"holdout {roi_txt}, P(any top-1%) {summ['p_any_top1']:.0%} "
+              f"[{_objective_text(args, payout.contest_size)}]")
 
         entry_ids = ef.entries.loc[ef.entries["contest_id"] == row["contest_id"], "entry_id"].tolist()
         for entry_id, ci in zip(entry_ids, chosen):
@@ -773,7 +798,7 @@ def cmd_dk_run(args: argparse.Namespace) -> None:
             if showdown:
                 print(f"    {_showdown_text(df, lu)} | ${lu.salary_used:,} | proj {lu.projected_points:.1f} | "
                       f"top-1% {m['top1_pct']:.1%} (holdout {hold.metrics.iloc[ci]['top1_pct']:.1%}) | "
-                      f"~{m['exp_dupes']:.0f} expected copies")
+                      f"best lineup in {m['opt_pct']:.2%} of sims | ~{m['exp_dupes']:.0f} expected copies")
             report_rows.append({
                 "entry_id": entry_id, "contest": row["contest_name"],
                 **dict(zip(labels, names)),
@@ -781,6 +806,7 @@ def cmd_dk_run(args: argparse.Namespace) -> None:
                 "roi": round(m["roi"], 4), "top1_pct": round(m["top1_pct"], 4),
                 "holdout_roi": round(hold.metrics.iloc[ci]["roi"], 4),
                 "holdout_top1_pct": round(hold.metrics.iloc[ci]["top1_pct"], 4),
+                "opt_pct": round(m["opt_pct"], 5),
                 "exp_dupes": round(m["exp_dupes"], 2),
             })
         if len(chosen) < len(entry_ids):
@@ -1256,9 +1282,12 @@ def main() -> None:
     p_con.add_argument("--min-cash-mult", type=float, default=2.0)
     p_con.add_argument("--payouts", default=None,
                        help="real payout CSV (rank_min,rank_max,payout); overrides the stylized curve")
-    p_con.add_argument("--objective", choices=["auto", "roi", "top1", "emax"], default="auto",
+    p_con.add_argument("--objective", choices=["auto", "roi", "top1", "emax", "blend", "ceiling"],
+                       default="auto",
                        help="auto (default): top1 for contests of %d+ entries, roi below; emax = "
-                            "Bergman-style best-entry payout" % AUTO_TOP1_SIZE)
+                            "Bergman-style best-entry payout; ceiling = most often the best lineup in a "
+                            "sim (SaberSim-style); blend = top1 and ceiling mixed by --ceiling-weight"
+                            % AUTO_TOP1_SIZE)
     p_con.add_argument("--min-unique", type=int, default=2)
     p_con.add_argument("--dst-cap", type=float, default=0.22)
     p_con.add_argument("--max-exposure", type=float, default=1.0)
@@ -1270,10 +1299,10 @@ def main() -> None:
     _add_stack_args(p_con)
     _add_field_optimizer_args(p_con)
     _add_portfolio_args(p_con)
-    p_con.add_argument("--showdown-rules", choices=["soft", "strict", "off"], default="soft",
-                       help="Showdown correlation rules for candidates: strict (no same-team RB pair, "
-                            "QB needs a catcher, catcher CPT needs his QB, max 1 DST), soft = strict "
-                            "plus RB-pair builds limited by --max-rb-pair-share (default), off = none")
+    p_con.add_argument("--showdown-rules", choices=["light", "soft", "strict", "off"], default="light",
+                       help="Showdown rules for candidates: light (default) = max 1 DST; strict = also no "
+                            "same-team RB pair, QB needs a catcher, catcher CPT needs his QB; soft = strict "
+                            "plus RB-pair builds limited by --max-rb-pair-share; off = none")
     p_con.set_defaults(func=cmd_contest)
 
     p_dkp = sub.add_parser("dk-pool", help="Player pool (with DK IDs) from a DraftKings entry file")
@@ -1342,9 +1371,12 @@ def main() -> None:
     p_dkr.add_argument("--field-stack-mix", default=",".join(map(str, cs.DEFAULT_STACK_MIX)),
                        help="field share with 0,1,2+ of the QB's own WR/TE ('none' to disable; "
                             "default %(default)s, measured in real Millys)")
-    p_dkr.add_argument("--objective", choices=["auto", "roi", "top1", "emax"], default="auto",
+    p_dkr.add_argument("--objective", choices=["auto", "roi", "top1", "emax", "blend", "ceiling"],
+                       default="auto",
                        help="auto (default): top1 for contests of %d+ entries, roi below; emax = "
-                            "Bergman-style best-entry payout" % AUTO_TOP1_SIZE)
+                            "Bergman-style best-entry payout; ceiling = most often the best lineup in a "
+                            "sim (SaberSim-style); blend = top1 and ceiling mixed by --ceiling-weight"
+                            % AUTO_TOP1_SIZE)
     p_dkr.add_argument("--min-unique", type=int, default=2)
     p_dkr.add_argument("--dst-cap", type=float, default=0.22)
     p_dkr.add_argument("--max-exposure", type=float, default=1.0)
@@ -1355,9 +1387,10 @@ def main() -> None:
     p_dkr.add_argument("--report-out", default=None)
     p_dkr.add_argument("--exposure-out", default=None)
     p_dkr.add_argument("--fmt", default="classic", help=argparse.SUPPRESS)  # set from the entry file
-    p_dkr.add_argument("--showdown-rules", choices=["soft", "strict", "off"], default="soft",
-                       help="Showdown entry files: correlation rules (soft = strict plus some same-team "
-                            "RB pairs, played sparingly)")
+    p_dkr.add_argument("--showdown-rules", choices=["light", "soft", "strict", "off"], default="light",
+                       help="Showdown entry files: light (default) = max 1 DST; strict = also QB needs a "
+                            "catcher, catcher CPT needs his QB, no same-team RBs; soft = strict plus some "
+                            "same-team RB pairs, played sparingly; off = none")
     p_dkr.add_argument("--extra-lineups", action="append", default=[], metavar="FILE",
                        help="DK-format lineups added to the candidate pool (e.g. SaberSim's entries export, "
                             "an old upload); kept if they meet the stack rules, played only where the contest "

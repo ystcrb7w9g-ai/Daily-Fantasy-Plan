@@ -182,6 +182,15 @@ def has_same_team_rbs(df: pd.DataFrame, lineup: LineupResult) -> bool:
     return bool(d.loc[d["position"] == "RB", "team"].duplicated().any())
 
 
+# Showdown default: at most one DST, nothing else. The correlation rules threw
+# out the lineups that won: in the Week 5 SNF Showdown (78k entries) only
+# 3.4% of top-0.1% lineups (39% of the top 1%) met all of them -- 72% had a
+# QB without one of his own WR/TE (the winner: CPT Huntley with Henry and
+# London), 45% two RBs from one team. The sims carry the correlations.
+LIGHT_SHOWDOWN_RULES = ShowdownRules(max_dst=1, no_same_team_rbs=False, qb_needs_catcher=False,
+                                     catcher_cpt_needs_qb=False)
+
+
 def soft_showdown_rules(rules: ShowdownRules | None = None) -> list[ShowdownRules]:
     """
     Strict Showdown rules plus a copy allowing same-team RB pairs. Real
@@ -588,6 +597,16 @@ DEFAULT_OPTIMIZER_NOISE = 0.18
 # and captains drawn from FLEX ownership, the field had 22 / 7 / 5.
 SHOWDOWN_OPTIMIZER_SHARE = 0.25
 SHOWDOWN_OPTIMIZER_SOLVES = 2000
+# `blend` objective default: weight on the field-free ceiling (how often a
+# lineup is the best candidate in a sim) vs the top-1% chance against the field.
+DEFAULT_CEILING_WEIGHT = 0.5
+# Real Showdown fields pair the two starting QBs less often than independent
+# picks would: Week 5 SNF, 15.1% of 78k lineups played both, vs 45.6% x 39.5%
+# = 18.0% if independent -- an odds ratio of 0.61 (both x neither over
+# one-only x other-only), where our sampled field had ~0.67. The odds ratio
+# carries over to QBs owned 70-80%, where "both" can't fall far below
+# independence (MNF: 79% and 69% rostered force 48%+ to play both).
+SHOWDOWN_QB_PAIR_ODDS = 0.61
 
 # Real Milly field scores at the top 0.1% / top 1% / top 20%, divided by
 # the median score: mean of 2026 Weeks 1-5 (week to week 1.62-1.76 /
@@ -653,6 +672,7 @@ def generate_field(
     optimizer_solves: int = 500,
     optimizer_noise: float = DEFAULT_OPTIMIZER_NOISE,
     structure: dict[str, float] | None = DEFAULT_FIELD_STRUCTURE,
+    qb_pair_odds: float | None = SHOWDOWN_QB_PAIR_ODDS,
 ) -> np.ndarray:
     """
     Simulated opponent lineups as a (n_field, n_players) weight matrix
@@ -684,6 +704,10 @@ def generate_field(
       captains are drawn from captain ownership and the rest from `own`
       (then FLEX-only, summing to 500%), each calibrated to its own target.
       Without it, captains follow `own` like any other slot.
+    - Showdown QB pairing: lineups with both starting QBs are thinned (or
+      boosted) until the whole field, optimizer slice included, pairs them
+      at the odds ratio `qb_pair_odds` (`SHOWDOWN_QB_PAIR_ODDS`, measured in
+      a real Showdown); None = as drawn.
     - Classic stacking: QB teammates' WR/TE get a `stack_boost` sampling
       weight, then lineups are resampled so the shares with 0 / 1 / 2+
       QB-stacked pass catchers match `stack_mix` (None = no resampling).
@@ -737,6 +761,32 @@ def generate_field(
                                       (opt_p[:, None] * (opt_w == 1.5)).sum(axis=0)])
         own = np.clip((own - share * opt_own) / (1 - share), 1e-4, 0.95)
         n_field = n_field - len(opt_block)
+
+    # Showdown: each team's top-projected QB, and how the optimizer slice pairs them.
+    qb_pair = None
+    if fmt == "showdown" and qb_pair_odds is not None:
+        qbs = df[(df["position"] == "QB") & (pd.to_numeric(df["proj"], errors="coerce") > 0)]
+        qb_rows = [g["proj"].idxmax() for _, g in qbs.groupby("team")]
+        if len(qb_rows) == 2:
+            qb_pair = np.array([df.index.get_loc(i) for i in qb_rows])
+    opt_frac = len(opt_block) / (n_field + len(opt_block))
+    if qb_pair is not None and len(opt_block):
+        on = opt_w[:, qb_pair] > 0
+        opt_pair = (opt_p @ on.all(axis=1), opt_p @ on[:, 0], opt_p @ on[:, 1])
+    else:
+        opt_pair = (0.0, 0.0, 0.0)
+    pair_accept = 1.0
+
+    def both_qbs(ids):
+        return (ids == qb_pair[0]).any(axis=1) & (ids == qb_pair[1]).any(axis=1)
+
+    def pair_odds(w):
+        """Whole-field odds ratio of rostering both starting QBs."""
+        on = w[:, qb_pair] > 0
+        both = (1 - opt_frac) * on.all(axis=1).mean() + opt_frac * opt_pair[0]
+        r1 = (1 - opt_frac) * on[:, 0].mean() + opt_frac * opt_pair[1]
+        r2 = (1 - opt_frac) * on[:, 1].mean() + opt_frac * opt_pair[2]
+        return both * max(1 - r1 - r2 + both, 1e-6) / max((r1 - both) * (r2 - both), 1e-6)
 
     use_mix = fmt == "classic" and stack_mix is not None
     if use_mix:
@@ -799,6 +849,9 @@ def generate_field(
             if i == 40 and have.sum() < 0.05 * need.sum():
                 break  # hopeless (salary floor / stack mix unreachable); fail fast
             ids, cpt, ok = draw(logw, floor_for(batch))
+            if qb_pair is not None and pair_accept != 1.0:
+                keep_p = np.where(both_qbs(ids), min(1.0, pair_accept), min(1.0, 1.0 / pair_accept))
+                ok &= rng.random(len(ids)) < keep_p
             ids, cpt = ids[ok], (None if cpt is None else cpt[ok])
             if len(ids) == 0:
                 continue
@@ -830,6 +883,8 @@ def generate_field(
         realized = realized_shares(probe_w)
         if use_structure:
             update_boosts(probe_w)
+        if qb_pair is not None:
+            pair_accept = float(np.clip(pair_accept * qb_pair_odds / max(pair_odds(probe_w), 1e-3), 0.05, 20.0))
         last_ok = weights
         weights = weights * np.clip(own / np.maximum(realized, 1e-4), 0.2, 5.0) ** 0.8
         weights = np.clip(weights, own / 10.0, own * 10.0)
@@ -945,6 +1000,7 @@ class ContestResult:
     payouts: np.ndarray      # (n_sims, n_candidates) prize won per sim
     metrics: pd.DataFrame    # per-candidate summary
     top1: np.ndarray         # (n_sims, n_candidates) bool: finished in top 1%
+    best: np.ndarray | None = None  # (n_sims, k) the k highest-scoring candidates per sim
 
 
 @dataclass
@@ -960,20 +1016,27 @@ class FieldRanks:
     n_field: int
     cand_mean_pts: np.ndarray
     field_dupe_counts: np.ndarray  # exact copies of each candidate in the field sample
+    best: np.ndarray | None = None  # (n_sims, k) int32: the k highest-scoring candidates per sim
 
 
 def rank_against_field(
     cand_w: np.ndarray, field_w: np.ndarray, scores: np.ndarray, batch: int = 256,
     cand_offset: np.ndarray | None = None, field_offset: np.ndarray | None = None,
+    best_k: int = 1,
 ) -> FieldRanks:
     """
     `cand_offset` / `field_offset` add fixed points per lineup (e.g. late
     swap: points already scored by rostered players outside the pool).
+    `best_k`: also record each sim's `best_k` highest-scoring candidates
+    (field-free ceiling: how often a lineup is the best one, like
+    SaberSim's "Sim Optimals").
     """
     n_sims = len(scores)
     n_cand, n_field = len(cand_w), len(field_w)
     n_above = np.zeros((n_sims, n_cand), dtype=np.int32)
     n_equal = np.zeros((n_sims, n_cand), dtype=np.int32)
+    best_k = int(min(max(best_k, 1), n_cand))
+    best = np.zeros((n_sims, best_k), dtype=np.int32)
     cand_pts = np.zeros(n_cand)
     for s0 in range(0, n_sims, batch):
         sc = scores[s0:s0 + batch].astype(np.float32)
@@ -997,16 +1060,19 @@ def rank_against_field(
         n_above[s0:s0 + b] = n_field - hi
         n_equal[s0:s0 + b] = hi - lo
         cand_pts += cs.sum(axis=0)
+        best[s0:s0 + b] = (np.argmax(cs, axis=1)[:, None] if best_k == 1
+                           else np.argpartition(-cs, best_k - 1, axis=1)[:, :best_k])
 
     field_keys = Counter(map(bytes, (field_w * 2).astype(np.uint8)))
     dupes = np.array([field_keys.get(bytes(r), 0) for r in (cand_w * 2).astype(np.uint8)])
-    return FieldRanks(n_above, n_equal, n_field, cand_pts / n_sims, dupes)
+    return FieldRanks(n_above, n_equal, n_field, cand_pts / n_sims, dupes, best)
 
 
-def score_contest(ranks: FieldRanks, payout: PayoutCurve) -> ContestResult:
-    """Price precomputed field placements under one contest's size and payouts."""
+def score_contest(ranks: FieldRanks, payout: PayoutCurve, top_frac: float = 0.01) -> ContestResult:
+    """Price precomputed field placements under one contest's size and payouts.
+    `top_frac` sets the finish that counts in `top1` / `top1_pct` (default the top 1%)."""
     scale = (payout.contest_size - 1) / ranks.n_field
-    top1_rank = max(1.0, 0.01 * payout.contest_size)
+    top1_rank = max(1.0, top_frac * payout.contest_size)
 
     # Each sampled field lineup stands for `scale` real entries, so a
     # candidate with k sampled lineups above it really sits somewhere in
@@ -1031,7 +1097,9 @@ def score_contest(ranks: FieldRanks, payout: PayoutCurve) -> ContestResult:
         "win_pct": ((ranks.n_above == 0) / length).mean(axis=0),
         "exp_dupes": ranks.field_dupe_counts * scale,
     })
-    return ContestResult(pay, metrics, top1)
+    if ranks.best is not None:  # share of sims in which it is (one of) the best candidate(s)
+        metrics["opt_pct"] = np.bincount(ranks.best.ravel(), minlength=len(mean_pay)) / len(ranks.best)
+    return ContestResult(pay, metrics, top1, ranks.best)
 
 
 def simulate_contest(
@@ -1087,6 +1155,7 @@ def select_portfolio(
     cheap_salary: float | None = None,
     cheap_cap: float = 0.4,
     max_rb_pair_share: float | None = None,
+    ceiling_weight: float = DEFAULT_CEILING_WEIGHT,
 ) -> list[int]:
     """
     Greedy portfolio pick; returns candidate indices in selection order.
@@ -1099,6 +1168,13 @@ def select_portfolio(
     objective="emax" : each pick maximizes E[best payout among the picks]
                        (Bergman et al.: entries should play off each other
                        -- one 1st and one last beats two mid-pack cashes).
+    objective="ceiling": each pick maximizes the sims in which some pick is
+                       among the best candidates of that sim
+                       (`result.best`; field-free, like SaberSim's "Sim
+                       Optimals").
+    objective="blend": (1 - ceiling_weight) x the top1 gain + ceiling_weight
+                       x the ceiling gain, each scaled by its best
+                       candidate's, so 0 is "top1" and 1 is "ceiling".
     Exposure caps are the same ownership-tiered caps as `build`, plus a
     global `max_exposure`; lineups must differ from every pick by at least
     `min_unique` players. `tiered_caps=False` drops the ownership tiers
@@ -1113,8 +1189,12 @@ def select_portfolio(
     first, each with the best eligible lineup containing the player -- the
     candidate pool must hold enough of them (`add_locked_candidates`).
     """
-    if objective not in ("roi", "top1", "emax"):
-        raise ValueError("objective must be 'roi', 'top1' or 'emax'")
+    if objective not in ("roi", "top1", "emax", "ceiling", "blend"):
+        raise ValueError("objective must be 'roi', 'top1', 'emax', 'ceiling' or 'blend'")
+    if objective == "ceiling":
+        objective, ceiling_weight = "blend", 1.0
+    if objective == "blend" and result.best is None:
+        raise ValueError("the ceiling / blend objectives need ContestResult.best (rank_against_field)")
     n_players = len(df)
     is_dst = (df["position"] == "DST").to_numpy()
     tiered = df["own"].apply(default_exposure_cap).to_numpy() if tiered_caps else np.ones(n_players)
@@ -1146,14 +1226,25 @@ def select_portfolio(
     if exclude:
         available[list(exclude)] = False
     covered = np.zeros(result.top1.shape[0], dtype=np.float32)
-    top1_f = result.top1.astype(np.float32) if objective == "top1" else None
+    top1_f = result.top1.astype(np.float32) if objective in ("top1", "blend") else None
     best_pay = np.zeros(result.payouts.shape[0], dtype=np.float32)
+    w_ceil = float(np.clip(ceiling_weight, 0.0, 1.0)) if objective == "blend" else 0.0
+    opt_covered = np.zeros(result.top1.shape[0], dtype=bool)
+
+    def scaled(x):
+        top = x[available].max() if available.any() else 0.0
+        return x / top if top > 0 else np.zeros_like(x)
 
     while len(chosen) < n_lineups and available.any():
         if objective == "roi":
             score = ev.copy()
         elif objective == "top1":
             score = (1.0 - covered) @ top1_f + 1e-6 * ev / max(ev.max(), 1e-9)
+        elif objective == "blend":
+            t_gain = (1.0 - covered) @ top1_f if w_ceil < 1 else np.zeros(len(candidates))
+            o_gain = np.bincount(result.best[~opt_covered].ravel(), minlength=len(candidates)).astype(float)
+            score = ((1 - w_ceil) * scaled(t_gain) + w_ceil * scaled(o_gain)
+                     + 1e-6 * ev / max(ev.max(), 1e-9))
         else:
             gain = np.zeros(len(candidates))
             live = np.flatnonzero(available)
@@ -1202,8 +1293,10 @@ def select_portfolio(
         n_pair += int(is_pair[picked])
         available[picked] = False
         counts[candidates[picked].player_ids] += 1
-        if objective == "top1":
+        if objective in ("top1", "blend"):
             covered = np.maximum(covered, top1_f[:, picked])
+            if objective == "blend":
+                opt_covered |= (result.best == picked).any(axis=1)
         elif objective == "emax":
             best_pay = np.maximum(best_pay, result.payouts[:, picked])
     return chosen

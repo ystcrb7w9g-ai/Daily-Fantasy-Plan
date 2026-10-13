@@ -102,10 +102,17 @@ PERCENTILE_LEVELS = {"p25": 0.25, "p50": 0.50, "p75": 0.75, "p85": 0.85, "p95": 
 # top-10% game" 66% -> 76% (real 86%); QB1+WR1+WR2 co-booms 3.6x -> 3.7x
 # (3.9x). Ranking 40k real Milly lineups by simulated top-1% chance (AUC for
 # a real top-1% finish): Week 5 0.632 (old) -> 0.649, Week 4 0.570 -> 0.569.
+# QB refit (Oct 13, after two Showdowns paid both-QB builds): QBs carried as
+# much own noise as a receiver, so opposing QBs moved together at 0.12 (real
+# 0.20). `qb_noise_mult` 0.4 with a stronger catcher link and smaller game
+# shocks gives QB~opp QB 0.20 (top-10% co-booms 1.73x, real 1.69x), QB~WR1/WR2
+# 0.41/0.34 (0.42/0.35), QB boom -> receiver boom 83% (86%), fit loss
+# 1.26 -> 1.15. Classic AUC: Week 5 0.648 -> 0.641, Week 4 0.563 -> 0.570;
+# real top-1% lineups in the best-rated 5%: 1.17% -> 1.41%, 0.78% -> 0.97%.
 TD_MODEL = {"game_total_sd_frac": 0.051, "team_split_sd": 0.653, "target_competition_weight": 0.380,
-            "game_script_weight": 0.046, "rb_competition_weight": 0.202, "qb_catcher_link": 0.40,
-            "shootout_sd": 0.176, "rb_link_weight": 0.223, "te_link_weight": 1.0, "td_layer": 1.3,
-            "td_game_sd": 0.35, "residual_sd_frac": 0.944}
+            "game_script_weight": 0.046, "rb_competition_weight": 0.202, "qb_catcher_link": 0.55,
+            "shootout_sd": 0.163, "rb_link_weight": 0.223, "te_link_weight": 1.0, "td_layer": 1.3,
+            "td_game_sd": 0.275, "residual_sd_frac": 0.944, "qb_noise_mult": 0.4}
 PASS_TDS_PER_TEAM = 1.46
 RUSH_TDS_PER_TEAM = 0.91
 AVG_TEAM_TOTAL = 22.5
@@ -216,6 +223,7 @@ def simulate_player_scores(
     use_percentiles: bool = True,
     td_layer: float = 0.0,
     td_game_sd: float = 0.0,
+    qb_noise_mult: float = 1.0,
 ) -> np.ndarray:
     """
     Simulate fantasy points for every player in `df` across `n_trials`
@@ -229,6 +237,8 @@ def simulate_player_scores(
     link also follows player profiles, fitted to real terciles: QB1~WR1
     +0.46 for pocket passers vs +0.33 for running QBs, +0.29 vs +0.42 for
     low- vs high-target WR1s, QB1~RB1 +0.04 vs +0.14 by RB targets.
+    `qb_noise_mult` scales QBs' own (player-level) noise; below 1 more of a
+    QB's game comes from his team, his receivers and the game (`TD_MODEL`).
 
     Returns
     -------
@@ -363,6 +373,9 @@ def simulate_player_scores(
     var_mult = np.ones(n_players)
     if qb_mask.sum() > 1:
         var_mult[qb_mask] = qb_variance_multiplier(df.loc[qb_mask, "salary"]).to_numpy()
+    # A QB's line is the sum of his team's passing game, so less of it is his
+    # own noise than a receiver's; the ceiling fit restores his spread after.
+    var_mult[qb_mask] *= qb_noise_mult
 
     # --- Assemble final scores ---
     proj = df["proj"].to_numpy()

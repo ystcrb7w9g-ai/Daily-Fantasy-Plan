@@ -35,7 +35,10 @@ shared, correlated factors — the same basic approach real sim-based tools
    models real boom risk (long TDs, garbage-time volume) better than a
    symmetric normal distribution.
 6. **QB-tier variance scaling**: cheaper/less-proven QBs get higher
-   variance as a proxy for backup/game-manager bust risk.
+   variance as a proxy for backup/game-manager bust risk. With the TD
+   model (the default) a QB's own noise is also cut to 0.4x a receiver's:
+   his line is mostly his team's passing game, so opposing QBs move
+   together like real ones do (+0.20).
 7. **Ceiling calibration**: each player's distribution is then rescaled
    so his simulated 85th percentile lands on the `ceiling` column while
    his mean stays on `proj` (Stokastic/SaberSim-style median + ceiling
@@ -280,6 +283,12 @@ What it does:
    - `--objective emax` makes each pick maximize the expected payout of
      the portfolio's *best* entry. This is the objective from Bergman et
      al.: entries should play off each other.
+   - `--objective ceiling` ignores the field: each pick maximizes the
+     sims in which some entry is the *best candidate* of that sim, like
+     SaberSim's "Sim Optimals". `--objective blend` mixes the two,
+     (1 − w) × top1 + w × ceiling with `--ceiling-weight w` (default
+     0.5). Not the default: in both Showdowns we replayed it lowered the
+     20-lineup portfolios' median score (see the Showdown section).
    - `--objective auto` is the default: `top1` for contests of 10,000+
      entries, `roi` below that.
 
@@ -311,12 +320,13 @@ What it does:
 
 **Showdown correlation rules** (`--fmt showdown`, `--showdown-rules`):
 
+- `light` (default) forbids only two DSTs; the sims decide the stacks.
 - `strict` forbids:
   - two RBs from one team;
   - a QB with none of his pass catchers;
   - a WR/TE captain without his QB;
   - two DSTs.
-- `soft` (default) builds candidates with the strict rules *and* a variant
+- `soft` builds candidates with the strict rules *and* a variant
   that allows a same-team RB pair. RB pairs are then limited to
   `--max-rb-pair-share` (default 20%) of the lineups. Real games support
   this: RB1 and RB2 scores are correlated at −0.07 overall. But in the 7%
@@ -472,27 +482,41 @@ boom games. Scored relative to expectation (season average x the game's Vegas
 team total), 2021-25 games show it; the production knobs fit the average
 correlations but not where they come from:
 
-| 2021-25, relative to expectation | real | old knobs (`--classic-sim`) | first TD model | TD model now |
-|---|---|---|---|---|
-| QB1 top-5% game -> a WR/TE teammate top-10% | 86% | 66% | 76% | 76% |
-| QB1~WR2 / QB1~TE1 correlation | 0.35 / 0.29 | 0.22 / 0.36 | 0.31 / 0.30 | 0.29 / 0.29 |
-| QB1~opp QB1 correlation | 0.20 | 0.11 | 0.15 | 0.12 |
-| RB1~RB2 correlation | -0.03 | -0.13 | -0.03 | -0.04 |
-| QB1 + WR1 + WR2 all top-15% (x chance) | 3.9x | 3.6x | 4.5x | 3.7x |
-| RMS error, all 21 teammate / 49 opponent role pairs | | 0.066 / 0.065 | 0.065 / 0.070 | 0.030 / 0.043 |
-| fit loss (pairs + boom/bust lifts + team totals) | | 2.16 | 2.16 | 1.30 |
+| 2021-25, relative to expectation | real | old knobs (`--classic-sim`) | first TD model | Oct 12 refit | QB refit (now) |
+|---|---|---|---|---|---|
+| QB1 top-5% game -> a WR/TE teammate top-10% | 86% | 66% | 76% | 76% | 83% |
+| QB1~WR2 / QB1~TE1 correlation | 0.35 / 0.29 | 0.22 / 0.36 | 0.31 / 0.30 | 0.29 / 0.29 | 0.34 / 0.36 |
+| QB1~opp QB1 correlation | 0.20 | 0.11 | 0.15 | 0.12 | 0.20 |
+| QB1 + opp QB1 both top-10% (x chance) | 1.69x | | | 1.55x | 1.73x |
+| RB1~RB2 correlation | -0.03 | -0.13 | -0.03 | -0.04 | -0.05 |
+| QB1 + WR1 + WR2 all top-15% (x chance) | 3.9x | 3.6x | 4.5x | 3.7x | 4.1x |
+| RMS error, all 21 teammate / 49 opponent role pairs | | 0.066 / 0.065 | 0.065 / 0.070 | 0.030 / 0.043 | 0.031 / 0.036 |
+| fit loss (pairs + boom/bust lifts + team totals) | | 2.16 | 2.16 | 1.30 | 1.15 |
 
 The TD model adds a team TD layer to every simulating command: each team's
 passing and rushing TD counts are Poisson with rates scaled by its simulated
 points (and a TD environment shared with its opponent); passing TDs go to the
 top QB plus a receiver by weight, rushing TDs to the RBs / QB; the layer is
-centered so means stay on `proj`. `simulate.TD_MODEL` holds all twelve
+centered so means stay on `proj`. `simulate.TD_MODEL` holds all thirteen
 correlation knobs, refit together. We scored 240 random draws, then ran a
 local search around the best, on all role pairs plus the boom/bust lifts.
 That search fit the pairs best (loss 1.11), but it ranked Week 4 lineups
 worst. So its QB-catcher link and TD-layer knobs are pulled back toward the
 first TD model, which costs a little fit (loss 1.30). `--classic-sim` goes
 back to the old knobs.
+
+**QB refit (Oct 13).** Two Showdowns in a row paid lineups with both QBs,
+and the Oct 12 knobs had opposing QBs at 0.12 (real 0.20). None of the
+game-level knobs could fix that: raising them made opposing *teams* move
+together too much (0.26 already, real 0.19). The cause was the QB's own
+noise. He carried as much as a receiver, although his line is the sum of
+his team's passing game. `qb_noise_mult` 0.4 (his own noise vs a
+receiver's), a QB-catcher link of 0.55 and slightly smaller game shocks
+(`shootout_sd` 0.163, `td_game_sd` 0.275) fix the QB pairs and lower the
+fit loss (1.26 -> 1.15 on the same seeds; it also pulls the opposing
+team link down to 0.24). QB1~TE1 overshoots (0.36 vs 0.29). The ceiling
+fit restores each QB's spread, so his range is unchanged; only who he
+booms with moves.
 
 It also ranks *real* lineups at least as well: best on Week 5, a tie on Week 4.
 We took 40k sampled real Milly lineups and simulated the slate. In each
@@ -506,7 +530,15 @@ really finished top 1% (0.5 is a coin flip):
 | old knobs | 0.632 | 0.570 |
 | first TD model | 0.643 | 0.578 |
 | pure pair refit | 0.645 | 0.564 |
-| TD model now | **0.649** | 0.569 |
+| Oct 12 refit | **0.649** | 0.569 |
+| QB refit (now) | 0.641 | 0.570 |
+
+The QB refit is a wash on AUC (rerun with more sims: Week 5 0.648 -> 0.641,
+Week 4 0.563 -> 0.570), but it concentrates real winners at the top: of
+the 5% of real lineups it rates best, 1.41% finished top 1% on Week 5
+(1.17% before) and 0.97% on Week 4 (0.78%). On the 77,561 real Week 5 SNF
+Showdown entries (with the Showdown field's QB pairing), its top-1% AUC
+is 0.575 (0.558 before).
 
 Week 4 differences are within noise (345 top-1% lineups). Still not modeled:
 yardage and the 300/100-yard bonuses (in 70-90% of real boom games), and
@@ -556,12 +588,29 @@ python -m dfs_engine.cli dk-run --pool sd_pool.csv --entries DKEntries.csv \
   (The field's captain shares follow SaberSim's captain projections,
   26 / 20 / 9%. Two seeds each.)
 
-- **Rules.** `--showdown-rules soft` (default): a QB needs one of his
-  WR/TE, a WR/TE captain needs his QB, at most one DST, and no two RBs
-  from one team, except in a share of candidates (capped at 20% of
-  picks). Classic stacking flags and `--max-game-stack-share` are
-  ignored, with a note. Each pick is printed with its team split and
-  expected copies.
+- **Rules.** `--showdown-rules light` (default): at most one DST,
+  nothing else. The correlation rules of `soft` / `strict` (a QB needs
+  one of his WR/TE, a WR/TE captain needs his QB, no two RBs from one
+  team) threw out the lineups that won. In the Week 5 SNF Showdown only
+  3% of the top-0.1% lineups met them all (39% of the top 1%, 58% of the
+  field): 72% had a QB without one of his own WR/TE (the winner: CPT
+  Huntley with Henry, London, Pitts and both kickers), and 45% had two
+  RBs from one team. Classic stacking flags and `--max-game-stack-share`
+  are ignored, with a note. Each pick is printed with its team split,
+  how often it was the best candidate in a sim, and expected copies.
+- **QB pairing.** Real Showdown fields pair the two starting QBs less
+  often than independent picks would. Sunday, 15.1% of lineups played
+  both, vs 18.0% if picked independently: an odds ratio of 0.61 (1 =
+  independent), where our field had 0.67. The field is now calibrated to
+  0.61 (`SHOWDOWN_QB_PAIR_ODDS`). It moves little. Sunday's simulated
+  field went from 24% to 23% both-QB. Monday's stayed at 52%: QBs
+  projected at 79% and 69% rostered force at least 48% to play both. The
+  rest of Sunday's gap (23% vs 15%) is SaberSim's QB ownership: 47.6% /
+  42.0% projected FLEX for Huntley / Penix, vs 39.2% / 36.2% real.
+- **Ceiling vs the field.** `--objective ceiling` / `blend` (see Contest
+  sim) rank lineups wholly or partly by how often they are the best
+  lineup in a sim, the way SaberSim does. In the replays below that
+  didn't help, so `auto` stays `top1`.
 - **`--extra-lineups`** takes SaberSim's Showdown lineups export (CPT +
   5 FLEX IDs) or any DK Showdown upload. Those lineups join the
   candidate pool and are played only where our contest sim prefers them.
@@ -581,6 +630,33 @@ proven:
 | new engine, 1 run (5k sims): CPT Huntley, Henry, Flowers, Andrews, Folk, ATL DST | 103.5 | 6,149 (top 8%) | ~4 / 3 |
 
 The expected copies printed for each pick tracked the real field's.
+
+Replays of both Showdowns after the Oct 13 changes. Same SaberSim
+inputs, with SaberSim's lineups in the candidate pool and 20k sims.
+Sunday's finishes are exact; Monday's are estimated from a simulated
+field scored on the real results. Cash lines were about 97.7 Sunday and
+138.3 Monday.
+
+| | SNF single entry | SNF 20 lineups: median / cashing | MNF single entry | MNF 20 lineups: median / cashing |
+|---|---|---|---|---|
+| old engine | 98.7 (15,079th) | 97.1 / 6 | 106.3 (~80,700th) | 122.1 / 3 |
+| + QB refit | 98.7 (15,079th) | 97.7 / 7 | 105.9 (~81,000th) | 125.6 / 4 |
+| + light rules and QB pairing (default now) | 97.7 (17,226th) | 97.7 / 7 | 105.9 (~81,000th) | 125.6 / 4 |
+| `blend`, ceiling weight 0.25 | 104.4 (5,331st) | 96.3 / 6 | 105.9 | 122.0 / 4 |
+| `blend`, ceiling weight 0.5 | 96.3 (20,873rd) | 96.3 / 7 | 125.1 (~47,200th) | 118.9 / 2 |
+| `ceiling` | 85.5 (52,375th) | 94.9 / 5 | 125.1 (~47,200th) | 122.1 / 2 |
+| SaberSim | your entry: 103.2 (6,522nd) | | | your 20: 132.7 / 7 |
+
+- The QB refit is the one change that helped both portfolios: +0.6 and
+  +3.5 median points and one more cashing lineup in each game. The light
+  rules and QB pairing barely moved these picks.
+- Weighting ceiling helped some single entries but lowered every
+  20-lineup portfolio's median. On Sunday's 77,561 real entries, ranking
+  by "how often it's the best lineup in a sim" picked out the real top-1%
+  finishers *worse* than chance (AUC 0.49, vs 0.575 for the top-1% chance
+  against the field).
+- SaberSim's 20 lineups still beat ours on Monday. Two games settle
+  little; Monday's standings are the next test.
 
 ### Late swap (`dk-late-swap`)
 

@@ -357,6 +357,75 @@ def test_auto_objective_by_contest_size():
     a = argparse.Namespace(objective="auto")
     assert _objective(a, 150_000) == "top1" and _objective(a, 500) == "roi"
     assert _objective(argparse.Namespace(objective="emax"), 150_000) == "emax"
+    sd = argparse.Namespace(objective="auto", fmt="showdown")
+    assert _objective(sd, 88_000) == "top1" and _objective(sd, 500) == "roi"
+
+
+def test_score_contest_top_frac_tightens_the_top_finish():
+    df, cands, res = _graded()
+    W = cs.lineups_to_weights(cands, len(df))
+    ranks = cs.rank_against_field(W, cs.generate_field(df, 2000, seed=15), simulate_player_scores(df, n_trials=400, seed=16))
+    pay = cs.gpp_payout_curve(20_000, 10.0)
+    one, tenth = cs.score_contest(ranks, pay), cs.score_contest(ranks, pay, top_frac=0.001)
+    assert (tenth.top1 <= one.top1).all() and tenth.top1.mean() < one.top1.mean()
+
+
+def test_rank_against_field_records_each_sims_best_candidates():
+    df, cands, res = _graded()
+    W = cs.lineups_to_weights(cands, len(df))
+    ev = simulate_player_scores(df, n_trials=300, seed=13)
+    field = cs.generate_field(df, 1000, seed=14)
+    r1 = cs.rank_against_field(W, field, ev)
+    assert np.array_equal(r1.best[:, 0], np.argmax(np.round(ev @ W.T, 2), axis=1))
+    r3 = cs.rank_against_field(W, field, ev, best_k=3)
+    out = cs.score_contest(r3, cs.gpp_payout_curve(20_000, 10.0))
+    assert r3.best.shape == (300, 3) and np.isclose(out.metrics["opt_pct"].sum(), 3.0)
+    assert (r3.best == r1.best[:, :1]).any(axis=1).all()  # the best is among the top 3
+
+
+def test_ceiling_and_blend_objectives():
+    df, cands, res = _graded()
+    kw = dict(min_unique=1, tiered_caps=False, dst_cap=1.0)
+    opt = np.bincount(res.best.ravel(), minlength=len(cands))
+    ceil = cs.select_portfolio(df, cands, res, 5, objective="ceiling", **kw)
+    top1 = cs.select_portfolio(df, cands, res, 5, objective="top1", **kw)
+    assert len(ceil) == len(top1) == 5 and opt[ceil[0]] == opt.max()
+    assert cs.select_portfolio(df, cands, res, 5, objective="blend", ceiling_weight=0.0, **kw) == top1
+    assert cs.select_portfolio(df, cands, res, 5, objective="blend", ceiling_weight=1.0, **kw) == ceil
+    # Ceiling picks cover the most sims in which some pick is the best lineup.
+    covered = lambda picks: np.isin(res.best[:, 0], picks).mean()  # noqa: E731
+    assert covered(ceil) >= covered(top1)
+    import pytest
+    with pytest.raises(ValueError):
+        cs.select_portfolio(df, cands, cs.ContestResult(res.payouts, res.metrics, res.top1), 3, objective="blend")
+
+
+def test_showdown_field_pairs_starting_qbs_at_the_target_odds_ratio():
+    df = _showdown_pool()
+    qbs = np.flatnonzero(df["position"].to_numpy() == "QB")
+
+    def odds(f):
+        on = f[:, qbs] > 0
+        b, r1, r2 = on.all(axis=1).mean(), on[:, 0].mean(), on[:, 1].mean()
+        return b * (1 - r1 - r2 + b) / ((r1 - b) * (r2 - b))
+    loose = cs.generate_field(df, 6000, fmt="showdown", seed=46, min_salary=40_000, qb_pair_odds=None)
+    for target in (0.45, 1.3):
+        f = cs.generate_field(df, 6000, fmt="showdown", seed=46, min_salary=40_000, qb_pair_odds=target)
+        assert abs(np.log(odds(f) / target)) < abs(np.log(odds(loose) / target))
+        assert abs(np.log(odds(f) / target)) < np.log(1.35)
+        assert np.abs(cs.field_shares(f, df)[0] + cs.field_shares(f, df)[1] - df["own"]).max() < 0.08
+
+
+def test_light_showdown_rules_keep_lone_qbs_and_one_dst():
+    df = _showdown_pool()
+    light = cs.LIGHT_SHOWDOWN_RULES
+    ix = {n: i for i, n in enumerate(df["name"])}
+    lone_qb = [ix[n] for n in ("ATL QB10000", "ATL RB9000", "NO RB9000", "NO WR8000", "ATL RB4000", "NO DST3500")]
+    assert cs.satisfies_showdown_rules(df, lone_qb, lone_qb[0], light)
+    assert not cs.satisfies_showdown_rules(df, lone_qb, lone_qb[0], cs.soft_showdown_rules()[0])
+    two_dst = lone_qb[:5] + [ix["ATL DST3500"]]
+    two_dst[4] = ix["NO DST3500"]
+    assert not cs.satisfies_showdown_rules(df, two_dst, two_dst[0], light)
 
 
 def test_field_structure_matches_real_milly_rates():

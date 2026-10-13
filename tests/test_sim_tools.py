@@ -161,6 +161,19 @@ def test_td_model_makes_qb_booms_come_with_receiver_booms():
     assert np.allclose(td.mean(axis=0) / df["proj"].to_numpy(), 1.0, atol=0.06)
 
 
+def test_qb_noise_mult_ties_opposing_qbs_together():
+    from dfs_engine.simulate import TD_MODEL
+    df = _multi_game_pool()
+    qb = df[df["position"] == "QB"].sort_values("proj").groupby("team").tail(1)
+    a = qb[qb["team"] == "AAA"].index[0]
+    b = qb[qb["team"] == qb.loc[a, "opp"]].index[0]
+    corr = lambda sc: np.corrcoef(sc[:, a], sc[:, b])[0, 1]  # noqa: E731
+    loose = simulate_player_scores(df, n_trials=30000, seed=32, **dict(TD_MODEL, qb_noise_mult=1.0))
+    tight = simulate_player_scores(df, n_trials=30000, seed=32, **TD_MODEL)
+    assert TD_MODEL["qb_noise_mult"] < 1 and corr(tight) > corr(loose) + 0.04
+    assert np.allclose(tight.mean(axis=0) / df["proj"].to_numpy(), 1.0, atol=0.06)
+
+
 # --- outcomes report -------------------------------------------------------
 
 def test_player_outcomes_columns_and_ranges():
