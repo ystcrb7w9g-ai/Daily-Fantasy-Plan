@@ -62,6 +62,7 @@ from __future__ import annotations
 import argparse
 import csv
 import os
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
@@ -121,8 +122,19 @@ def _stack_rules(args: argparse.Namespace) -> StackRules | None:
     return rules
 
 
+def _engine(args: argparse.Namespace) -> str:
+    """--engine auto: the box-score engine for Showdown (kickers and DSTs move with the game there,
+    and it ranked both real 2026 Showdowns' entries better), the factor model for Classic."""
+    e = getattr(args, "engine", "factor")
+    if e == "auto":
+        return "stat" if getattr(args, "fmt", "classic") == "showdown" else "factor"
+    return e
+
+
 def _sim_knobs(args: argparse.Namespace) -> dict:
-    """The TD model unless --classic-sim (or a command without sim args)."""
+    """The TD model unless --classic-sim (or a command without sim args); the stat engine replaces both."""
+    if _engine(args) == "stat":
+        return {"engine": "stat"}
     if not hasattr(args, "classic_sim"):
         return {}
     return {} if args.classic_sim else dict(TD_MODEL)
@@ -164,6 +176,10 @@ def _add_sim_args(p: argparse.ArgumentParser) -> None:
                    help="use the original correlation knobs instead of the default TD model (shared team "
                         "TDs, knobs refit to real 2021-25 player pairs; see simulate.TD_MODEL)")
     p.add_argument("--td-model", action="store_true", help=argparse.SUPPRESS)  # the default now; kept for old scripts
+    p.add_argument("--engine", choices=["auto", "factor", "stat"], default="auto",
+                   help="auto (default): stat for Showdown, factor for Classic. factor: correlated factor model "
+                        "with the TD layer; stat: simulated box scores per game (targets, catches, yards, TDs, "
+                        "kicks, DST events), DK bonuses included")
     p.add_argument("--spread-scale", type=float, default=None,
                    help="width of default ceilings for players without one (default: fitted to "
                         "real Milly score spreads in contest/dk-run, %.2f elsewhere)" % DEFAULT_SPREAD_SCALE)
@@ -366,6 +382,46 @@ def _add_field_optimizer_args(p: argparse.ArgumentParser) -> None:
                    help=f"default 500 Classic / {cs.SHOWDOWN_OPTIMIZER_SOLVES} Showdown")
     p.add_argument("--field-optimizer-noise", type=float, default=cs.DEFAULT_OPTIMIZER_NOISE,
                    help="lognormal sd of projection noise per solve (lower = more duplication)")
+
+
+def _add_model_args(p: argparse.ArgumentParser) -> None:
+    """dk-run's modeling options (shared with `backtest`, which replays dk-run on past contests)."""
+    p.add_argument("--candidates", type=int, default=2000)
+    p.add_argument("--gen-trials", type=int, default=5000)
+    p.add_argument("--eval-trials", type=int, default=5000)
+    p.add_argument("--holdout-trials", type=int, default=3000)
+    p.add_argument("--field-size", type=int, default=20000)
+    p.add_argument("--field-min-salary", type=int, default=None)
+    p.add_argument("--field-stack-mix", default=",".join(map(str, cs.DEFAULT_STACK_MIX)),
+                   help="field share with 0,1,2+ of the QB's own WR/TE ('none' to disable; "
+                        "default %(default)s, measured in real Millys)")
+    p.add_argument("--objective", choices=["auto", "roi", "top1", "emax", "blend", "ceiling"],
+                   default="auto",
+                   help="auto (default): top1 for contests of %d+ entries, roi below; emax = "
+                        "Bergman-style best-entry payout; ceiling = most often the best lineup in a "
+                        "sim (SaberSim-style); blend = top1 and ceiling mixed by --ceiling-weight"
+                        % AUTO_TOP1_SIZE)
+    p.add_argument("--min-unique", type=int, default=2)
+    p.add_argument("--dst-cap", type=float, default=0.22)
+    p.add_argument("--max-exposure", type=float, default=1.0)
+    p.add_argument("--seed", type=int, default=None)
+    p.add_argument("--fmt", default="classic", help=argparse.SUPPRESS)  # set from the entry file / slate
+    p.add_argument("--showdown-rules", choices=["light", "soft", "strict", "off"], default="light",
+                   help="Showdown entry files: light (default) = max 1 DST; strict = also QB needs a "
+                        "catcher, catcher CPT needs his QB, no same-team RBs; soft = strict plus some "
+                        "same-team RB pairs, played sparingly; off = none")
+    p.add_argument("--leftover-share", type=float, default=0.0,
+                   help="share of candidates that must leave salary unused (the field spends nearly all of it)")
+    p.add_argument("--own-penalty-share", type=float, default=0.0,
+                   help="share of candidates optimized with an ownership penalty (leverage builds)")
+    p.add_argument("--field-own-sd", type=float, default=0.0,
+                   help="ownership uncertainty: build the field from several ownership draws, each player's "
+                        "projected ownership times lognormal(0, this) (0 = treat projections as exact)")
+    _add_exposure_args(p)
+    _add_sim_args(p)
+    _add_stack_args(p)
+    _add_field_optimizer_args(p)
+    _add_portfolio_args(p)
 
 
 def _parse_stack_mix(text: str):
@@ -620,13 +676,15 @@ def _objective_text(args: argparse.Namespace, contest_size: int) -> str:
     return f"blend, ceiling weight {_ceiling_weight(args):g}" if obj == "blend" else obj
 
 
-def _pick_for_contest(df, candidates, result, n, args, exclude=frozenset(), contest_size=None) -> list[int]:
+def _pick_for_contest(df, candidates, result, n, args, exclude=frozenset(), contest_size=None,
+                      prior_counts=None, prior_n=0) -> list[int]:
     kw = _portfolio_kwargs(args)
     objective = _objective(args, contest_size or 0)
     kw["ceiling_weight"] = _ceiling_weight(args)
     chosen = cs.select_portfolio(
         df, candidates, result, n, objective=objective, min_unique=args.min_unique,
-        dst_cap=args.dst_cap, max_exposure=args.max_exposure, exclude=set(exclude), **kw,
+        dst_cap=args.dst_cap, max_exposure=args.max_exposure, exclude=set(exclude),
+        prior_counts=prior_counts, prior_n=prior_n, **kw,
     )
     if len(chosen) < n:  # caps/uniqueness too tight for this pool: relax, don't leave entries blank
         more = cs.select_portfolio(
@@ -663,6 +721,143 @@ def _showdown_text(df: pd.DataFrame, lu) -> str:
             + " | " + " / ".join(f"{t} {k}" for t, k in split.items()))
 
 
+@dataclass
+class SlateModel:
+    """Everything `dk-run` builds before picking lineups for each contest."""
+    rules: object
+    field: np.ndarray
+    candidates: list
+    cand_w: np.ndarray
+    ranks: "cs.FieldRanks"
+    hold_ranks: "cs.FieldRanks"
+    extra_rows: dict
+    need_min: np.ndarray
+    min_exp: np.ndarray
+    eval_scores: np.ndarray
+    holdout_scores: np.ndarray
+
+
+def model_slate(df: pd.DataFrame, args: argparse.Namespace, total: int) -> SlateModel:
+    """
+    The modeling half of `dk-run` (also replayed by `backtest`): rules, field,
+    sims, candidates (+ min-exposure and --extra-lineups ones), and their
+    placements against the field on the evaluation and holdout sims. `df`
+    gets the --min-exp / --max-exp columns; `args.fmt` must be set.
+    """
+    showdown = args.fmt == "showdown"
+    if showdown:
+        if args.max_game_stack_share is not None:
+            print("Note: --max-game-stack-share is Classic only (every Showdown lineup is one game); ignoring.")
+            args.max_game_stack_share = None
+        _stack_rules(args)  # prints a note if Classic stacking flags were given
+        rules = _showdown_rules(args)
+        if rules is not None:
+            print(f"Showdown rules ({args.showdown_rules}): {SHOWDOWN_RULES_TEXT[args.showdown_rules]}")
+    else:
+        rules = _stack_rules(args)
+    if percentile_mask(df).any():
+        print(f"  {int(percentile_mask(df).sum())} players carry their own p25-p99 percentiles "
+              "(sims mapped onto them; correlations stay ours)")
+    if _engine(args) == "stat":
+        print("  stat engine: simulated box scores per game (yards, catches, TDs, kicks, DST events)"
+              + (" -- the Showdown default; --engine factor for the factor model" if args.engine == "auto" else ""))
+    elif _sim_knobs(args):
+        print("  TD model on (default; --classic-sim for the old knobs): shared team TDs, knobs refit to real pairs")
+    _apply_exposure_flags(df, args)
+    _exposure_note(df)
+    min_exp, max_exp = cs.player_exposure_limits(df)
+    banned = set(np.flatnonzero(max_exp <= 0).tolist())
+
+    seed = args.seed
+    sub_seed = (lambda k: None) if seed is None else (lambda k: seed + k)
+    print(f"Sampling a {args.field_size:,}-lineup field from ownership...")
+    field_kw = dict(fmt=args.fmt, min_salary=args.field_min_salary, stack_mix=_parse_stack_mix(args.field_stack_mix),
+                    seed=sub_seed(2), **_optimizer_kwargs(args))
+    if getattr(args, "field_own_sd", 0.0) > 0:
+        print(f"  ownership uncertainty: {cs.FIELD_OWN_DRAWS} ownership draws, sd {args.field_own_sd:g} (log scale)")
+        field = cs.generate_field_mixture(df, args.field_size, own_sd=args.field_own_sd, **field_kw)
+    else:
+        field = cs.generate_field(df, args.field_size, **field_kw)
+    if showdown:
+        flex_share, cpt_share = cs.field_shares(field, df)
+        top = np.argsort(-cpt_share)[:4]
+        print("  field captains: " + ", ".join(f"{df['name'].iloc[i]} {cpt_share[i]:.0%}" for i in top))
+    _fit_spread(df, field, args)
+
+    print(f"Simulating {args.gen_trials} + {args.eval_trials} + {args.holdout_trials} trials...")
+    gen_scores = _simulate(df, args, args.gen_trials, seed)
+    eval_scores = _simulate(df, args, args.eval_trials, sub_seed(1))
+    holdout_scores = _simulate(df, args, args.holdout_trials, sub_seed(3))
+
+    n_cand = max(args.candidates, 3 * total)
+    print(f"Generating {n_cand} candidate lineups...")
+    candidates = cs.generate_candidates(df, gen_scores, n_cand, fmt=args.fmt, stack_rules=rules,
+                                        seed=seed, progress=True, excluded_ids=banned or None,
+                                        leftover_share=getattr(args, "leftover_share", 0.0),
+                                        own_penalty_share=getattr(args, "own_penalty_share", 0.0))
+    need_min = np.flatnonzero(min_exp > 0)
+    if len(need_min):
+        n_each = max(10, int(np.ceil(2 * min_exp[need_min].max() * total)))
+        added = cs.add_locked_candidates(df, gen_scores, candidates, need_min, n_each, fmt=args.fmt,
+                                         stack_rules=rules, seed=seed, excluded_ids=banned or None)
+        print(f"  +{added} candidates built around the {len(need_min)} min-exposure players")
+    extra_rows: dict[str, set[int]] = {}
+    for path in args.extra_lineups:
+        lineups = dk.read_lineup_file(path)
+        if lineups and len(lineups[0]) != (6 if showdown else 9):
+            raise SystemExit(f"{path} holds {'Classic' if len(lineups[0]) == 9 else 'Showdown'} lineups; "
+                             f"this slate is {args.fmt.title()}")
+        kept, n = cs.candidates_from_ids(df, lineups, stack_rules=rules, existing=candidates)
+        n_banned = sum(bool(banned & set(lu.player_ids)) for lu in kept)
+        kept = [lu for lu in kept if not banned & set(lu.player_ids)]
+        extra_rows[os.path.basename(path)] = set(range(len(candidates), len(candidates) + len(kept)))
+        candidates += kept
+        print(f"  +{len(kept)} of {n['read']} lineups from {os.path.basename(path)} "
+              f"({n['breaks_rules']} break the stack rules, {n['not_in_pool']} use an unprojected/out player, "
+              f"{n_banned} use a banned player, {n['invalid']} invalid, {n['duplicate']} already in the pool)")
+    cand_w = cs.lineups_to_weights(candidates, len(df))
+    print("Ranking candidates against the field...")
+    ranks = cs.rank_against_field(cand_w, field, eval_scores)
+    hold_ranks = cs.rank_against_field(cand_w, field, holdout_scores)
+    return SlateModel(rules, field, candidates, cand_w, ranks, hold_ranks, extra_rows, need_min, min_exp,
+                      eval_scores, holdout_scores)
+
+
+def _sharpen_of(row) -> float:
+    v = row.get("field_sharpen")
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return 1.0
+    return v if np.isfinite(v) and v > 0 else 1.0
+
+
+def _contest_fields(df: pd.DataFrame, args: argparse.Namespace, contests: pd.DataFrame, m: SlateModel) -> dict:
+    """
+    Contests whose `field_sharpen` (contests CSV) isn't 1 get their own field: ownership raised to
+    that power within each position (above 1 = chalkier, as small or high-stakes fields tend to be;
+    `backtest` reports the power that fits each past contest's real ownership). Returns
+    {sharpen: (ranks, holdout ranks)}.
+    """
+    out = {}
+    if "field_sharpen" not in contests.columns:
+        return out
+    for g in sorted({_sharpen_of(r) for r in contests.to_dict("records")} - {1.0}):
+        d = df.copy()
+        d["own"] = ownership.sharpen_ownership(pd.to_numeric(d["own"], errors="coerce"), d["position"], g)
+        if "cpt_own" in d:
+            c = pd.to_numeric(d["cpt_own"], errors="coerce").clip(lower=0).fillna(0.0)
+            d["cpt_own"] = c ** g / (c ** g).sum() * c.sum() if c.sum() > 0 else c
+        print(f"Sampling a {args.field_size:,}-lineup field with ownership sharpened to the power {g:g}...")
+        kw = dict(fmt=args.fmt, min_salary=args.field_min_salary, stack_mix=_parse_stack_mix(args.field_stack_mix),
+                  seed=None if args.seed is None else args.seed + 2, **_optimizer_kwargs(args))
+        f = (cs.generate_field_mixture(d, args.field_size, own_sd=args.field_own_sd, **kw)
+             if getattr(args, "field_own_sd", 0.0) > 0 else cs.generate_field(d, args.field_size, **kw))
+        out[g] = (cs.rank_against_field(m.cand_w, f, m.eval_scores),
+                  cs.rank_against_field(m.cand_w, f, m.holdout_scores))
+    return out
+
+
 def cmd_dk_run(args: argparse.Namespace) -> None:
     ef = dk.read_entry_file(args.entries)
     args.fmt = ef.fmt
@@ -685,88 +880,34 @@ def cmd_dk_run(args: argparse.Namespace) -> None:
     if (df["own"] <= 0).mean() > 0.5:
         print("WARNING: most players have no ownership projection -- the simulated field "
               "(and therefore ROI) will be close to meaningless. Supply `own`.")
-    if showdown:
-        if args.max_game_stack_share is not None:
-            print("Note: --max-game-stack-share is Classic only (every Showdown lineup is one game); ignoring.")
-            args.max_game_stack_share = None
-        _stack_rules(args)  # prints a note if Classic stacking flags were given
-        rules = _showdown_rules(args)
-        if rules is not None:
-            print(f"Showdown rules ({args.showdown_rules}): {SHOWDOWN_RULES_TEXT[args.showdown_rules]}")
-    else:
-        rules = _stack_rules(args)
     contests = pd.read_csv(args.contests) if args.contests else dk.estimate_contests(ef.entries)
     contests["contest_id"] = contests["contest_id"].astype(str)
     total = int(contests["our_entries"].sum())
     print(f"{len(df)} projected players; {total} entries in {len(contests)} contests.")
-    if percentile_mask(df).any():
-        print(f"  {int(percentile_mask(df).sum())} players carry their own p25-p99 percentiles "
-              "(sims mapped onto them; correlations stay ours)")
-    if _sim_knobs(args):
-        print("  TD model on (default; --classic-sim for the old knobs): shared team TDs, knobs refit to real pairs")
-    _apply_exposure_flags(df, args)
-    _exposure_note(df)
-    min_exp, max_exp = cs.player_exposure_limits(df)
-    banned = set(np.flatnonzero(max_exp <= 0).tolist())
-
-    seed = args.seed
-    sub_seed = (lambda k: None) if seed is None else (lambda k: seed + k)
-    print(f"Sampling a {args.field_size:,}-lineup field from ownership...")
-    field = cs.generate_field(df, args.field_size, fmt=args.fmt, min_salary=args.field_min_salary,
-                              stack_mix=_parse_stack_mix(args.field_stack_mix), seed=sub_seed(2),
-                              **_optimizer_kwargs(args))
-    if showdown:
-        flex_share, cpt_share = cs.field_shares(field, df)
-        top = np.argsort(-cpt_share)[:4]
-        print("  field captains: " + ", ".join(f"{df['name'].iloc[i]} {cpt_share[i]:.0%}" for i in top))
-    _fit_spread(df, field, args)
-
-    print(f"Simulating {args.gen_trials} + {args.eval_trials} + {args.holdout_trials} trials...")
-    gen_scores = _simulate(df, args, args.gen_trials, seed)
-    eval_scores = _simulate(df, args, args.eval_trials, sub_seed(1))
-    holdout_scores = _simulate(df, args, args.holdout_trials, sub_seed(3))
-
-    n_cand = max(args.candidates, 3 * total)
-    print(f"Generating {n_cand} candidate lineups...")
-    candidates = cs.generate_candidates(df, gen_scores, n_cand, fmt=args.fmt, stack_rules=rules,
-                                        seed=seed, progress=True, excluded_ids=banned or None)
-    need_min = np.flatnonzero(min_exp > 0)
-    if len(need_min):
-        n_each = max(10, int(np.ceil(2 * min_exp[need_min].max() * total)))
-        added = cs.add_locked_candidates(df, gen_scores, candidates, need_min, n_each, fmt=args.fmt,
-                                         stack_rules=rules, seed=seed, excluded_ids=banned or None)
-        print(f"  +{added} candidates built around the {len(need_min)} min-exposure players")
-    extra_rows: dict[str, set[int]] = {}
-    for path in args.extra_lineups:
-        lineups = dk.read_lineup_file(path)
-        if lineups and len(lineups[0]) != (6 if showdown else 9):
-            raise SystemExit(f"{path} holds {'Classic' if len(lineups[0]) == 9 else 'Showdown'} lineups; "
-                             f"this entry file is {args.fmt.title()}")
-        kept, n = cs.candidates_from_ids(df, lineups, stack_rules=rules, existing=candidates)
-        n_banned = sum(bool(banned & set(lu.player_ids)) for lu in kept)
-        kept = [lu for lu in kept if not banned & set(lu.player_ids)]
-        extra_rows[os.path.basename(path)] = set(range(len(candidates), len(candidates) + len(kept)))
-        candidates += kept
-        print(f"  +{len(kept)} of {n['read']} lineups from {os.path.basename(path)} "
-              f"({n['breaks_rules']} break the stack rules, {n['not_in_pool']} use an unprojected/out player, "
-              f"{n_banned} use a banned player, {n['invalid']} invalid, {n['duplicate']} already in the pool)")
-    cand_w = cs.lineups_to_weights(candidates, len(df))
-    print("Ranking candidates against the field...")
-    ranks = cs.rank_against_field(cand_w, field, eval_scores)
-    hold_ranks = cs.rank_against_field(cand_w, field, holdout_scores)
+    model = model_slate(df, args, total)
+    field, candidates = model.field, model.candidates
+    extra_rows, need_min, min_exp = model.extra_rows, model.need_min, model.min_exp
+    contest_ranks = _contest_fields(df, args, contests, model)
 
     slot_ids: dict[str, list[str]] = {}
     report_rows, used, taken = [], [], set()
+    slate_counts, slate_n = np.zeros(len(df), dtype=int), 0  # --global-exposure: caps across all contests
     # Highest-stakes contests pick first (matters with --unique-across-contests).
     contests = contests.sort_values(["entry_fee", "contest_size"], ascending=False, kind="stable")
     for c in contests.itertuples(index=False):
         row = c._asdict()
         payout = _contest_payout(row)
         n = int(row["our_entries"])
+        ranks, hold_ranks = contest_ranks.get(_sharpen_of(row), (model.ranks, model.hold_ranks))
         result = cs.score_contest(ranks, payout)
         chosen = _pick_for_contest(df, candidates, result, n, args, contest_size=payout.contest_size,
-                                   exclude=taken if args.unique_across_contests else frozenset())
+                                   exclude=taken if args.unique_across_contests else frozenset(),
+                                   prior_counts=slate_counts if args.global_exposure else None,
+                                   prior_n=slate_n if args.global_exposure else 0)
         taken.update(chosen)
+        for ci in chosen:
+            slate_counts[candidates[ci].player_ids] += 1
+        slate_n += len(chosen)
         for label, rows_from in extra_rows.items():
             print(f"  {sum(c in rows_from for c in chosen)} of {len(chosen)} picks come from {label}")
         for j in need_min:
@@ -822,6 +963,47 @@ def cmd_dk_run(args: argparse.Namespace) -> None:
         exp_df["field_own"] = exp_df["name"].map(pd.Series((field > 0).mean(axis=0), index=df["name"])).round(4)
         exp_df.to_csv(args.exposure_out, index=False)
         print(f"Wrote exposure report to {args.exposure_out}")
+
+
+def cmd_backtest(args: argparse.Namespace) -> None:
+    import time
+    from . import backtest as bt
+    specs = bt.read_manifest(args.manifest)
+    if args.slates:
+        keep = {x.strip() for x in args.slates.split(",")}
+        specs = [s for s in specs if s.label in keep]
+    n_list = tuple(int(x) for x in args.lineups.split(","))
+    results = []
+    for spec in specs:
+        t0 = time.time()
+        print(f"{spec.label}: replaying dk-run on {os.path.basename(spec.pool)}...", flush=True)
+        keep = os.path.join(args.keep_models, f"{spec.label}.pkl") if args.keep_models else None
+        if keep:
+            os.makedirs(args.keep_models, exist_ok=True)
+        r = bt.run_slate(spec, args, n_lineups=n_list, n_sample=args.real_sample, keep=keep)
+        results.append(r)
+        g, top = r.get("ranking") or {}, r["replay"]["picks"][n_list[0]]
+        line = f"  {time.time() - t0:.0f}s"
+        if g:
+            line += (f" | ranking real entries: AUC {g['auc_top1']:.3f}, real top-1% in our best 5% "
+                     f"{g['real_top1_in_best_5pct']:.1%}, predicted top-1% {g['predicted_top1_mean']:.1%} (real 1%)")
+        if "best_finish" in top:
+            line += f" | {n_list[0]}-entry pick: {top['best']:.1f} pts, finish {top['best_finish']:,}"
+        print(line, flush=True)
+    bt.save(results, args.out_dir)
+    tables = bt.summarize(results, n_list)
+    with pd.option_context("display.width", 220, "display.max_columns", 30, "display.float_format", "{:.3f}".format):
+        for name in ("ranking", "field", "picks", "extra"):
+            if len(tables[name]):
+                print(f"\n{name}:")
+                print(tables[name].to_string(index=False))
+    picks = tables["picks"]
+    if len(picks) and "won" in picks and picks["won"].notna().any():
+        for n, g in picks.groupby("entries"):
+            fees, won = g["fees"].sum(), g["won"].sum()
+            print(f"  {n:>3} entries a slate: fees ${fees:,.0f}, est. won ${won:,.0f} "
+                  f"(ROI {won / fees - 1:+.0%}), cashes {int(g['cashes'].sum())}, top-1% {int(g['top-1%'].sum())}")
+    print(f"Wrote {args.out_dir}/backtest.json and summary CSVs")
 
 
 def _now_eastern(text: str | None) -> pd.Timestamp:
@@ -1214,7 +1396,7 @@ def cmd_corr_measure(args: argparse.Namespace) -> None:
     print(f"Wrote {args.out}")
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="dfs_engine")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -1362,45 +1544,34 @@ def main() -> None:
     p_dkr.add_argument("--pool", required=True, help="pool with proj/own (+ dk_id from dk-pool)")
     p_dkr.add_argument("--entries", required=True)
     p_dkr.add_argument("--contests", default=None, help="contests CSV from dk-contests (edited)")
-    p_dkr.add_argument("--candidates", type=int, default=2000)
-    p_dkr.add_argument("--gen-trials", type=int, default=5000)
-    p_dkr.add_argument("--eval-trials", type=int, default=5000)
-    p_dkr.add_argument("--holdout-trials", type=int, default=3000)
-    p_dkr.add_argument("--field-size", type=int, default=20000)
-    p_dkr.add_argument("--field-min-salary", type=int, default=None)
-    p_dkr.add_argument("--field-stack-mix", default=",".join(map(str, cs.DEFAULT_STACK_MIX)),
-                       help="field share with 0,1,2+ of the QB's own WR/TE ('none' to disable; "
-                            "default %(default)s, measured in real Millys)")
-    p_dkr.add_argument("--objective", choices=["auto", "roi", "top1", "emax", "blend", "ceiling"],
-                       default="auto",
-                       help="auto (default): top1 for contests of %d+ entries, roi below; emax = "
-                            "Bergman-style best-entry payout; ceiling = most often the best lineup in a "
-                            "sim (SaberSim-style); blend = top1 and ceiling mixed by --ceiling-weight"
-                            % AUTO_TOP1_SIZE)
-    p_dkr.add_argument("--min-unique", type=int, default=2)
-    p_dkr.add_argument("--dst-cap", type=float, default=0.22)
-    p_dkr.add_argument("--max-exposure", type=float, default=1.0)
     p_dkr.add_argument("--unique-across-contests", action="store_true",
                        help="never reuse a lineup in two contests (highest entry fee picks first)")
-    p_dkr.add_argument("--seed", type=int, default=None)
+    p_dkr.add_argument("--global-exposure", action="store_true",
+                       help="apply the exposure caps (--max-exposure, ownership tiers, punt cap) to all entries "
+                            "across contests together, not contest by contest")
     p_dkr.add_argument("--upload-out", required=True)
     p_dkr.add_argument("--report-out", default=None)
     p_dkr.add_argument("--exposure-out", default=None)
-    p_dkr.add_argument("--fmt", default="classic", help=argparse.SUPPRESS)  # set from the entry file
-    p_dkr.add_argument("--showdown-rules", choices=["light", "soft", "strict", "off"], default="light",
-                       help="Showdown entry files: light (default) = max 1 DST; strict = also QB needs a "
-                            "catcher, catcher CPT needs his QB, no same-team RBs; soft = strict plus some "
-                            "same-team RB pairs, played sparingly; off = none")
     p_dkr.add_argument("--extra-lineups", action="append", default=[], metavar="FILE",
                        help="DK-format lineups added to the candidate pool (e.g. SaberSim's entries export, "
                             "an old upload); kept if they meet the stack rules, played only where the contest "
                             "sim prefers them. Repeatable")
-    _add_exposure_args(p_dkr)
-    _add_sim_args(p_dkr)
-    _add_stack_args(p_dkr)
-    _add_field_optimizer_args(p_dkr)
-    _add_portfolio_args(p_dkr)
+    _add_model_args(p_dkr)
     p_dkr.set_defaults(func=cmd_dk_run)
+
+    p_bt = sub.add_parser("backtest", help="Replay dk-run on past contests and grade it against the real standings")
+    p_bt.add_argument("--manifest", required=True,
+                      help="CSV, one past contest per row: label,pool,standings,entry_fee,prize_pool,top_prizes "
+                           "[,extra_lineups,actuals,contest_size] (see dfs_engine/backtest.py)")
+    p_bt.add_argument("--slates", default=None, help="comma-separated labels to run (default: all)")
+    p_bt.add_argument("--lineups", default="1,20,150", help="entry counts to replay (default %(default)s)")
+    p_bt.add_argument("--real-sample", type=int, default=40000,
+                      help="real entries per slate ranked by our sims (default %(default)s)")
+    p_bt.add_argument("--out-dir", default="outputs/backtest")
+    p_bt.add_argument("--keep-models", default=None, metavar="DIR",
+                      help="also pickle each slate's fitted model (field, sims, candidates) here")
+    _add_model_args(p_bt)
+    p_bt.set_defaults(func=cmd_backtest)
 
     p_fs = sub.add_parser("field-study", help="Profile past contest-standings exports (field behavior)")
     p_fs.add_argument("standings", nargs="+", help="contest-standings CSV or ZIP files")
@@ -1485,7 +1656,11 @@ def main() -> None:
     p_enrich.add_argument("--out", required=True)
     p_enrich.set_defaults(func=cmd_sgo_enrich)
 
-    args = parser.parse_args()
+    return parser
+
+
+def main() -> None:
+    args = build_parser().parse_args()
     args.func(args)
 
 

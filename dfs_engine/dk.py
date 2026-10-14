@@ -240,7 +240,12 @@ OUT_STATUSES = {"O", "OUT", "D", "DOUBTFUL", "IR", "PUP", "SUSP", "NA"}
 SABERSIM_PERCENTILES = (25, 50, 75, 85, 95, 99)
 PERCENTILE_COLUMNS = [f"p{q}" for q in SABERSIM_PERCENTILES]
 EXPOSURE_COLUMNS = ["min_exp", "max_exp"]
-PROVIDED_EXTRA_COLUMNS = ["team_total", "game_total"] + PERCENTILE_COLUMNS + EXPOSURE_COLUMNS
+# SaberSim's stat projections (per game), kept for the stat engine's usage shares.
+STAT_COLUMNS = {"passatt": "proj_pass_att", "passyds": "proj_pass_yds", "passtd": "proj_pass_td",
+                "rec": "proj_rec", "recyds": "proj_rec_yds", "rectd": "proj_rec_td",
+                "rushatt": "proj_rush_att", "rushyds": "proj_rush_yds", "rushtd": "proj_rush_td"}
+PROVIDED_EXTRA_COLUMNS = (["team_total", "game_total"] + PERCENTILE_COLUMNS + EXPOSURE_COLUMNS
+                          + list(STAT_COLUMNS.values()))
 
 
 def is_sabersim(raw: pd.DataFrame) -> bool:
@@ -279,6 +284,9 @@ def standardize_sabersim(raw: pd.DataFrame) -> pd.DataFrame:
     out["ceiling"] = out["p85"]
     out["min_exp"] = (num("minexp") / 100.0).clip(0, 1)
     out["max_exp"] = (num("maxexp") / 100.0).clip(0, 1)
+    for h, col in STAT_COLUMNS.items():
+        if h in heads:
+            out[col] = num(h)
     out.loc[out["injury"].isin(OUT_STATUSES), "proj"] = np.nan
     gone = out["proj"].isna()
     out.loc[gone, ["own", "ceiling"] + PERCENTILE_COLUMNS] = np.nan

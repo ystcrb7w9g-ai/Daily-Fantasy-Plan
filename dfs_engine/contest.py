@@ -205,6 +205,11 @@ def soft_showdown_rules(rules: ShowdownRules | None = None) -> list[ShowdownRule
     return [strict, replace(strict, no_same_team_rbs=False)]
 
 
+# Salary caps for leftover-salary candidates. Real fields spend nearly all of it (Millys: 85% at
+# $49,800+; Week 5 SNF Showdown: 57% at $49,500+), so a lineup at $49,000 rarely has twins.
+LEFTOVER_CAPS = {"classic": (49_600, 49_200, 48_800, 48_400), "showdown": (49_000, 48_400, 47_800, 47_000)}
+
+
 def generate_candidates(
     df: pd.DataFrame,
     scores: np.ndarray,
@@ -217,11 +222,24 @@ def generate_candidates(
     progress: bool = False,
     locked_ids: set[int] | None = None,
     excluded_ids: set[int] | None = None,
+    leftover_share: float = 0.0,
+    leftover_caps: tuple[int, ...] | None = None,
+    own_penalty_share: float = 0.0,
+    own_penalty_max: float = 0.6,
 ) -> list[LineupResult]:
     """
     Distinct lineups, each optimal for `(1 - m) * proj + m * trial` with a
     random simulated trial and a random mix m ~ U(mix_range). `locked_ids`
     / `excluded_ids` (pool row ids) are forced in / kept out of every one.
+
+    Two optional kinds of contrarian candidates, as the pros build them
+    (the contest sim then decides whether they're worth playing):
+    - `leftover_share` of the solves cap salary below the max, at one of
+      `leftover_caps` (default `LEFTOVER_CAPS`): real fields spend nearly
+      all of it, so leaving some is a cheap way to be unique.
+    - `own_penalty_share` of the solves score players at
+      points x (1 - lam x own), lam ~ U(0, own_penalty_max): leverage
+      builds that pay for fading the chalk.
 
     `stack_rules` may be a list of rule sets (see `flexible_stack_rules`):
     each solve then uses one of them in turn, so the pool spans stack
@@ -231,6 +249,12 @@ def generate_candidates(
     rule_sets = stack_rules if isinstance(stack_rules, list) else [stack_rules]
     rng = np.random.default_rng(seed)
     proj = df["proj"].to_numpy(dtype=float)
+    own = pd.to_numeric(df["own"], errors="coerce").fillna(0.0).to_numpy(dtype=float) if "own" in df else np.zeros(len(df))
+    own = own / 100.0 if own.max() > 1.5 else own
+    if fmt == "showdown":
+        cpt = captain_ownership(df)
+        own = own + (cpt if cpt is not None else 0.0)  # how often the field rosters him at all
+    caps = leftover_caps or LEFTOVER_CAPS[fmt]
     max_solves = max_solves or 3 * n_candidates
     seen: set[tuple] = set()
     out: list[LineupResult] = []
@@ -239,12 +263,15 @@ def generate_candidates(
             break
         m = rng.uniform(*mix_range)
         pts = (1 - m) * proj + m * scores[rng.integers(len(scores))]
+        cap = caps[rng.integers(len(caps))] if leftover_share and rng.random() < leftover_share else SALARY_CAP
+        if own_penalty_share and rng.random() < own_penalty_share:
+            pts = pts * (1.0 - rng.uniform(0.0, own_penalty_max) * np.clip(own, 0.0, 1.0))
         if fmt == "classic":
             lu = solve_classic(df, pts, locked_ids=locked_ids, excluded_ids=excluded_ids,
-                               stack_rules=rule_sets[solve_i % len(rule_sets)])
+                               stack_rules=rule_sets[solve_i % len(rule_sets)], max_salary=cap)
         else:
             lu = solve_showdown(df, pts, locked_ids=locked_ids, excluded_ids=excluded_ids,
-                                rules=rule_sets[solve_i % len(rule_sets)])
+                                rules=rule_sets[solve_i % len(rule_sets)], max_salary=cap)
         if lu is None:
             continue
         key = lineup_key(lu.player_ids, lu.captain_id)
@@ -903,6 +930,33 @@ def generate_field(
     return out[rng.permutation(len(out))]
 
 
+FIELD_OWN_DRAWS = 4
+
+
+def generate_field_mixture(df: pd.DataFrame, n_field: int, own_sd: float, draws: int = FIELD_OWN_DRAWS,
+                           seed: int | None = None, **kwargs) -> np.ndarray:
+    """
+    A field built from `draws` ownership scenarios: each multiplies every
+    player's projected ownership (and captain ownership) by lognormal(0,
+    `own_sd`) before sampling its share of the lineups. Projections miss
+    (real Millys: ~2-3 points per player, more on chalk), so a pick that only
+    looks good against the exact projected field is fragile.
+    """
+    rng = np.random.default_rng(seed)
+    parts = []
+    sizes = _largest_remainder(np.ones(draws), n_field)
+    for j, size in enumerate(sizes):
+        d = df.copy()
+        d["own"] = pd.to_numeric(d["own"], errors="coerce").fillna(0.0) * np.exp(
+            rng.normal(0.0, own_sd, len(d)) - own_sd ** 2 / 2)
+        if "cpt_own" in d:
+            d["cpt_own"] = pd.to_numeric(d["cpt_own"], errors="coerce").fillna(0.0) * np.exp(
+                rng.normal(0.0, own_sd, len(d)) - own_sd ** 2 / 2)
+        parts.append(generate_field(d, int(size), seed=int(rng.integers(1 << 31)), **kwargs))
+    out = np.concatenate(parts)
+    return out[rng.permutation(len(out))]
+
+
 def _largest_remainder(p: np.ndarray, n: int) -> np.ndarray:
     """Integer counts summing to n, proportional to p (largest-remainder rounding)."""
     raw = p / p.sum() * n
@@ -1156,6 +1210,8 @@ def select_portfolio(
     cheap_cap: float = 0.4,
     max_rb_pair_share: float | None = None,
     ceiling_weight: float = DEFAULT_CEILING_WEIGHT,
+    prior_counts: np.ndarray | None = None,
+    prior_n: int = 0,
 ) -> list[int]:
     """
     Greedy portfolio pick; returns candidate indices in selection order.
@@ -1188,6 +1244,10 @@ def select_portfolio(
     (they override the default caps; max 0 bans him). Minimums are filled
     first, each with the best eligible lineup containing the player -- the
     candidate pool must hold enough of them (`add_locked_candidates`).
+    `prior_counts` / `prior_n`: lineups already picked for other contests
+    (per-player counts, how many); the exposure caps then apply to all of
+    them together, so one player can't take over the whole slate's entries
+    contest by contest.
     """
     if objective not in ("roi", "top1", "emax", "ceiling", "blend"):
         raise ValueError("objective must be 'roi', 'top1', 'emax', 'ceiling' or 'blend'")
@@ -1208,6 +1268,10 @@ def select_portfolio(
     need = np.ceil(min_exp * n_lineups - 1e-9).astype(int)
     # The cap rounds down and the minimum up (60% of 3 = cap 1, need 2): the minimum wins.
     max_count = np.maximum(np.maximum(1, np.floor(caps * n_lineups)), need).astype(int)
+    if prior_counts is not None and prior_n > 0:  # caps over every entry so far, this contest's included
+        total_cap = np.maximum(1, np.floor(caps * (prior_n + n_lineups))).astype(int)
+        max_count = np.minimum(max_count, np.maximum(total_cap - np.asarray(prior_counts, dtype=int), need))
+        max_count = np.maximum(max_count, 0)
     max_count[max_exp <= 0] = 0                       # max 0% = banned
 
     ev = result.payouts.mean(axis=0).astype(np.float64)

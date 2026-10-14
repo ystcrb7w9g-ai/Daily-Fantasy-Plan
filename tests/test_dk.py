@@ -257,6 +257,23 @@ def test_dk_run_end_to_end():
     lineups = [frozenset(r[4:13]) for r in rows[1:]]
     assert len(set(lineups)) == len(lineups)  # no lineup reused across contests
 
+    # a chalkier field for one contest, one exposure budget for the slate, ownership uncertainty
+    contests = dk.estimate_contests(ef.entries)
+    contests["field_sharpen"] = np.where(contests["contest_id"] == "333", 1.3, 1.0)
+    contests_path = os.path.join(d, "contests.csv")
+    contests.to_csv(contests_path, index=False)
+    res = subprocess.run(cmd + ["--contests", contests_path, "--global-exposure", "--max-exposure", "0.6",
+                                "--field-own-sd", "0.3"], cwd=ROOT, capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr + res.stdout
+    assert "ownership sharpened to the power 1.3" in res.stdout
+    assert "ownership uncertainty: 4 ownership draws" in res.stdout
+    rows = list(csv.reader(open(up, encoding="utf-8")))
+    for r in rows[1:]:
+        dk.validate_upload_lineup(r[4:13], ef.players)
+    if "note: only" not in res.stdout:  # caps held without relaxing: no player in more than 60% of all 5
+        counts = pd.Series([p for r in rows[1:] for p in r[4:13]]).value_counts()
+        assert counts.max() <= 3
+
 
 # --- projections / lines import -------------------------------------------
 
@@ -351,6 +368,9 @@ def _sabersim_export(df, ef, path):
         for q, m in PCT_MULT.items():
             row[f"dk_{q}_percentile"] = r["proj"] * m
         row["dk_std"] = r["proj"] * 0.7
+        row.update({"Pass Att": 34.0 if r["position"] == "QB" else 0.0, "Rec": 4.0 if r["position"] in ("WR", "TE", "RB") else 0.0,
+                    "Rec TD": 0.3 if r["position"] in ("WR", "TE") else 0.1, "Rush Att": 14.0 if r["position"] == "RB" else 0.5,
+                    "Rush TD": 0.4 if r["position"] == "RB" else 0.05})
         rows.append(row)
     out = pd.DataFrame(rows)
     out.loc[0, "Name"] = "Renamed On SaberSim"         # matched by DFS ID anyway
@@ -383,6 +403,10 @@ def test_reads_sabersim_export_into_pool():
     assert np.allclose(pool["spread"], pool["game_total"] - 2 * pool["team_total"])
     sim_ready = load_player_pool_from(pool, d)
     assert {"p25", "p99", "min_exp"} <= set(sim_ready.columns)
+    # SaberSim's stat projections ride along for the stat engine
+    assert {"proj_pass_att", "proj_rec", "proj_rush_att", "proj_rec_td", "proj_rush_td"} <= set(pool.columns)
+    rb = pool[(pool["position"] == "RB") & pool["proj"].notna()].iloc[0]
+    assert rb["proj_rush_att"] == 14.0 and rb["proj_rec"] == 4.0
 
 
 def load_player_pool_from(pool, d):
@@ -556,6 +580,7 @@ def test_showdown_pool_to_dk_run_with_sabersim_lineups():
     assert res.returncode == 0, res.stderr + res.stdout
     out = res.stdout
     assert "Showdown: ATL vs NO" in out and "field captains:" in out and "25% of the field" in out
+    assert "stat engine: simulated box scores" in out  # --engine auto: box scores for Showdown
     assert "Classic only" in out and "+1 of 1 lineups from lineups_dk_nfl_showdown.csv" in out
     assert out.count("    CPT ") == 2  # each pick printed with its teams
     with open(up, newline="") as f:

@@ -122,10 +122,12 @@ def solve_classic(
     excluded_ids: set[int] | None = None,
     max_exposure_mask: np.ndarray | None = None,
     stack_rules: StackRules | None = None,
+    max_salary: float = SALARY_CAP,
 ) -> LineupResult | None:
     """
     Solve one optimal Classic DK lineup given a points vector (one
-    simulated trial, or projections for a baseline solve).
+    simulated trial, or projections for a baseline solve). `max_salary`
+    below the cap forces salary to be left unused.
     """
     n = len(df)
     locked_ids = locked_ids or set()
@@ -145,7 +147,7 @@ def solve_classic(
     # total roster size == 9
     A_rows.append(np.ones(n)); lb.append(CLASSIC_ROSTER_SIZE); ub.append(CLASSIC_ROSTER_SIZE)
     # salary cap
-    A_rows.append(salary.astype(float)); lb.append(0); ub.append(SALARY_CAP)
+    A_rows.append(salary.astype(float)); lb.append(0); ub.append(min(max_salary, SALARY_CAP))
     # QB exactly 1
     A_rows.append(pos_mask("QB")); lb.append(1); ub.append(1)
     # DST exactly 1
@@ -218,6 +220,7 @@ def solve_showdown(
     locked_ids: set[int] | None = None,
     excluded_ids: set[int] | None = None,
     rules: ShowdownRules | None = None,
+    max_salary: float = SALARY_CAP,
 ) -> LineupResult | None:
     """
     Showdown solve: each player gets two decision variables, FLEX and
@@ -247,7 +250,7 @@ def solve_showdown(
 
     # salary cap
     row = np.concatenate([salary, cpt_salary])
-    A_rows.append(row); lb.append(0); ub.append(SALARY_CAP)
+    A_rows.append(row); lb.append(0); ub.append(min(max_salary, SALARY_CAP))
 
     # DraftKings rule: players from both teams (<= 5 of 6 from either one)
     team = df["team"].to_numpy()

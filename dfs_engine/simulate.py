@@ -224,6 +224,8 @@ def simulate_player_scores(
     td_layer: float = 0.0,
     td_game_sd: float = 0.0,
     qb_noise_mult: float = 1.0,
+    engine: str = "factor",
+    stat_knobs: dict | None = None,
 ) -> np.ndarray:
     """
     Simulate fantasy points for every player in `df` across `n_trials`
@@ -240,12 +242,24 @@ def simulate_player_scores(
     `qb_noise_mult` scales QBs' own (player-level) noise; below 1 more of a
     QB's game comes from his team, his receivers and the game (`TD_MODEL`).
 
+    `engine="stat"` replaces steps 1-6 with simulated box scores
+    (`statsim.stat_game_scores`, knobs in `stat_knobs`): yards, catches,
+    TDs, turnovers and kicks from one consistent game per trial, scored
+    with DK bonuses. Steps 7-8 (fit to proj / ceiling, provided
+    percentiles) still apply, and the correlation knobs are ignored.
+
     Returns
     -------
     scores : np.ndarray, shape (n_trials, len(df))
     """
     rng = np.random.default_rng(seed)
     n_players = len(df)
+    if engine == "stat":
+        from .statsim import stat_game_scores
+        raw = stat_game_scores(df, n_trials, rng, stat_knobs)
+        return _fit_marginals(raw, df, calibrate_ceiling, ceiling_pct, spread_scale, use_percentiles)
+    if engine != "factor":
+        raise ValueError("engine must be 'factor' or 'stat'")
 
     games = df.groupby(["team", "opp"]).ngroup()
     game_ids = df.apply(lambda r: tuple(sorted([r["team"], r["opp"]])), axis=1)
@@ -407,9 +421,16 @@ def simulate_player_scores(
             if td_game_sd else np.ones((n_trials, n_games))
         scores = scores + td_layer * touchdown_points(
             df, team_points_draw * game_td[:, team_game_arr], player_team_idx, team_names, rng)
+    return _fit_marginals(scores, df, calibrate_ceiling, ceiling_pct, spread_scale, use_percentiles)
+
+
+def _fit_marginals(scores: np.ndarray, df: pd.DataFrame, calibrate_ceiling: bool, ceiling_pct: float,
+                   spread_scale: float | None, use_percentiles: bool) -> np.ndarray:
+    """Steps 7-8: each player's draws refit to his proj / ceiling, then onto provided percentiles."""
+    proj = df["proj"].to_numpy(dtype=float)
     if calibrate_ceiling:
         ceiling = (df["ceiling"].to_numpy(dtype=float) if "ceiling" in df.columns
-                   else np.full(n_players, np.nan))
+                   else np.full(len(df), np.nan))
         if spread_scale is not None:
             ceiling = fill_default_ceilings(ceiling, proj, df["position"], spread_scale)
         scale, shift = ceiling_calibration(scores, ceiling, proj, ceiling_pct)

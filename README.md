@@ -8,6 +8,27 @@ This is the productionized version of a pipeline originally built
 iteratively (week by week, across Weeks 1–3 of the 2026 season) as ad-hoc
 scripts. This repo consolidates that work into a tested, reusable package.
 
+## How this compares with the paid tools
+
+The sites (SaberSim, Stokastic, FantasyLabs) and the published research
+(Hunter, Vielma & Zaman 2016; Haugh & Singal 2021) share one process:
+project, simulate games, model the field, simulate the contest, pick a
+portfolio, then test what works on many past slates. The table maps each
+step to what this engine does. Their internals aren't public; their side
+comes from their exports and descriptions.
+
+| Step | The paid tools | Here |
+|---|---|---|
+| Projections, ownership | Their own models, updated with news all morning | Yours (SaberSim, GoingFor2, DFF), optionally blended with ours; fixed when you run |
+| Game simulation | Play-by-play (SaberSim): each sim one consistent game | Box scores per game with DK bonuses, kickers and DSTs (`--engine stat`, the Showdown default); factor model with a TD layer for Classic |
+| Candidate lineups | Lineups that win sims; leverage and salary-leftover builds | Optimal for projection + one sim; `--leftover-share` / `--own-penalty-share` add contrarian builds |
+| Opponent field | Shaped like the contest: size, buy-in, chalkiness | Ownership-sampled, matched to real fields' stacking, salary and duplication; per-contest `field_sharpen`; `--field-own-sd` for ownership error |
+| Ranking and portfolio | ROI / top-finish rates; portfolio across contests | Top-1% coverage (default), ROI, best-entry, ceiling; `--global-exposure` caps players across contests |
+| Testing what works | Years of slates | `backtest` on every past contest you keep |
+
+Data and access gaps code can't close: real-time news, live prop markets,
+and years of contest history.
+
 ## Why this isn't "independent noise per player"
 
 Most naive DFS projection tools simulate each player's fantasy score with
@@ -409,6 +430,25 @@ Then upload `dk_upload.csv` on DraftKings' Edit Entries page.
   own best lineups, so the same lineup can appear in several contests.
   `--unique-across-contests` forbids that; the highest-fee contest picks
   first.
+- **One exposure budget for the whole slate.** By default the exposure
+  caps (`--max-exposure`, the ownership tiers, the punt cap) apply contest
+  by contest, so one player can top every contest's list. With
+  `--global-exposure` they apply to all your entries together, the way
+  the sites' portfolio tools treat the slate as one bet.
+- **A field per contest type.** Small or high-stakes contests tend to play
+  chalkier than projected. Add a `field_sharpen` column to the contests
+  CSV (ownership raised to that power within each position; above 1 =
+  chalkier) and that contest gets its own field. `backtest` prints the
+  power that fit each past contest's real ownership: the 2026 Millys and
+  primetime Showdowns ranged 0.85-1.15, so they keep the default of 1.
+- **Which game simulation.** `--engine auto` (the default) plays
+  Showdowns out as box scores (the stat engine below) and simulates
+  Classic slates with the factor model; `--engine stat` / `--engine
+  factor` forces either. The Backtest section has how each did.
+- **More options** (all off by default; see the Backtest section for how
+  they did): `--leftover-share` / `--own-penalty-share` (candidates that
+  leave salary unused / fade the chalk), `--field-own-sd` (a field built
+  from several ownership draws, for ownership error).
 - **Missing players.** Players without a projection are dropped at load,
   and those without ownership count as 0%. `dk-run` warns if most
   ownership is missing, since the simulated field depends on it.
@@ -547,6 +587,85 @@ ours is 0). SaberSim percentiles fix the marginal shapes when you have them.
 On Week 5 they were the best-calibrated shapes we have: RMS 0.034 across
 p5-p99, vs 0.055 for our own. Default curves fit to Weeks 1-4 did worse out
 of sample (0.104), so none ship.
+
+### Stat engine (`--engine stat`, the Showdown default)
+
+SaberSim simulates plays; the factor model above simulates fantasy points.
+The stat engine (`dfs_engine/statsim.py`; the default for Showdowns,
+`--engine stat` for any simulating command) plays every game out as box
+scores instead, then scores them the DraftKings way, 300/100-yard bonuses
+included:
+
+- each team gets dropbacks, sacks and carries from a shared game pace, and
+  a team that trails passes more;
+- targets and carries are split by each player's share, with week-to-week
+  noise in the shares; catches, yards per catch and per carry follow
+  2021-25 rates by position;
+- a QB's passing yards are exactly his receivers' yards, and every passing
+  TD is one receiver's TD; TD counts rise with the Vegas total and the
+  offense's efficiency that game;
+- turnovers hand the other team short fields; kickers score the drives
+  that stall; a DST's points come from the opponent's sacks, interceptions,
+  fumbles and points.
+
+Usage comes from the pool: SaberSim's stat projections (`dk-pool` keeps
+their catches, carries and TDs per player) when present, otherwise targets
+per game or each projection split by position. The draws are then fit to
+each player's projection and ceiling (or SaberSim's percentiles) exactly
+as in the factor model, so the box scores decide who booms together and
+the inputs decide by how much.
+
+Fit against the same 2021-25 targets as the TD model (3 seeds x 12k
+trials; `statsim.STAT_KNOBS`):
+
+| relative to expectation | real | factor model (TD model) | stat engine |
+|---|---|---|---|
+| fit loss (pairs + boom/bust lifts + team totals) | | 1.15 | **0.97** |
+| RMS error, 21 teammate / 49 opponent role pairs | | **0.031** / 0.036 | 0.034 / **0.028** |
+| opposing team totals correlation | 0.19 | 0.25 | **0.18** |
+| QB1 ~ opp QB1 | 0.20 | **0.20** | 0.16 |
+| QB1 top-5% game -> a WR/TE teammate top-10% | 86% | 83% | **84%** |
+| team-total spread (sd / mean) | 0.33 | 0.30 | **0.31** |
+
+A stronger shared game shock (`game_score_sd` 0.235 instead of 0.203)
+brings QB ~ opposing QB to the real 0.20 at a worse fit overall (loss
+1.03). In the backtest it ranked both Showdowns' real entries worse (AUC
+0.647 / 0.553 vs 0.697 / 0.609), so the best fit stays.
+
+The factor model leaves kickers and defenses almost independent of
+everything; real ones aren't. Measured on 2,698 real team-games and on the
+two Showdown pools:
+
+| correlation | real 2021-25 | factor model | stat engine |
+|---|---|---|---|
+| DST ~ opposing QB | -0.43 | -0.02 | -0.45 |
+| DST ~ opposing RB1 / WR1 | -0.31 / -0.21 | -0.01 / -0.01 | -0.24 / -0.13 |
+| DST ~ own RB1 | +0.07 | -0.01 | +0.08 |
+| K ~ own QB | +0.10 | +0.02 | +0.09 |
+| K ~ own DST | +0.27 | 0.00 | +0.18 |
+| K ~ opposing DST | -0.37 | -0.01 | -0.26 |
+| DST ~ opposing DST | -0.31 | 0.00 | -0.23 |
+| RMS gap over 12 K/DST pairs | | 0.24 | **0.09** |
+
+In the backtest (the seven contests in the Backtest section, same inputs
+and seeds; the last column adds SaberSim's stat projections to the pool,
+which only the Week 5 slates have):
+
+| contest | ranking AUC: factor model | stat engine | stat + SaberSim stats |
+|---|---|---|---|
+| W1 / W2 / W3 / W4 Milly | 0.526 / 0.822 / 0.660 / 0.522 | 0.533 / 0.833 / 0.633 / 0.520 | |
+| W5 Milly | **0.639** | 0.623 | 0.621 |
+| SNF Showdown | 0.593 | 0.666 | **0.697** |
+| MNF Showdown | 0.574 | 0.591 | **0.609** |
+
+- **Showdowns:** it ranked both contests' real entries better, and on
+  SNF 2.5% of the real top-1% entries landed in the 5% we rated best
+  (0.5% with the factor model). Our 150-entry picks did about the same
+  (the two contests: 87-91 cashes, 5-6 top-1% finishes, ROI -42% to
+  -43% for every version). It's the Showdown default (`--engine auto`).
+- **Classic:** even on ranking (mean AUC 0.628 vs 0.634 over the five
+  Millys); its picks cashed more (249 vs 232 of 750) but finished top 1%
+  less (16 vs 25), so Classic keeps the factor model.
 
 ### Showdown entry files (`dk-pool` / `dk-run` on a single game)
 
@@ -704,6 +823,86 @@ The report shows each swap (out → in), points so far, and expected
 payout and top-1% odds before and after. Upload the file on DK's Edit
 Entries page. Locked players keep their IDs, so DK accepts the file as
 is.
+
+### Backtest on past contests (`backtest`)
+
+The sites tune on hundreds of slates; a change that helps one game proves
+little. `backtest` replays `dk-run` (the same code: `cli.model_slate` and
+the per-contest pick) on every past contest you keep, with the inputs you
+had at lock, and grades it against the real standings:
+
+```bash
+python -m dfs_engine.cli backtest --manifest slates.csv --out-dir outputs/backtest \
+    --qb-stack 2 --bring-back 1 --flex-stacks --max-per-game 4 --max-per-team 3 \
+    --max-vs-dst 0 --max-game-stack-share 0.5 --max-exposure 0.4   # your usual dk-run flags
+```
+
+`slates.csv` has one past contest per row: `label, pool, standings,
+entry_fee, prize_pool, top_prizes` (known prizes for 1st, 2nd, ...,
+separated by `;`), and optionally `extra_lineups` (another tool's lineups,
+e.g. SaberSim's export, graded head to head and offered as candidates),
+`actuals` (a name,actual CSV for a contest without standings) and
+`contest_size`. Paths are relative to the manifest. Per contest it reports:
+
+1. **Ranking.** Our sims rank the contest's *real* entries (40k sampled):
+   AUC for a real top-1% finish, and how many real top-1% entries land in
+   the 1% / 5% we rate best. This is the most data-rich test: tens of
+   thousands of real lineups per slate.
+2. **Field.** Our simulated field next to the real one: projection,
+   ownership, salary, stacking, duplication (chance two entries are the
+   same lineup), and *field strength*: how often real entries beat our
+   field's top-1% line (1% if our field is as strong as the real one).
+3. **Picks** for 1 / 20 / 150 entries, scored on the real results:
+   finishes (ties split), cashes, top-1% finishes, estimated winnings from
+   a DK-style table anchored on the known top prizes, sim ROI vs real.
+4. **Head to head:** the extra lineups' real results, and where our sim
+   ranked them.
+
+`--keep-models DIR` also saves each slate's fitted model (field, sims,
+candidates) for trying other settings on it.
+
+Our seven contests (the 2026 Week 1-5 Millionaire Makers, the Week 5 SNF
+and MNF Showdowns), with the factor model throughout (what every test
+below is compared with; Showdowns now default to the stat engine, see
+that section):
+
+| contest | ranking AUC | real top-1% in our best 5% | field strength (real is 1%) | 150 entries: cashes / top-1% / est. ROI |
+|---|---|---|---|---|
+| W1 Milly (832k) | 0.526 | 0.9% | 0.9% | 36 / 3 / -23% |
+| W2 Milly (173k) | 0.822 | 6.7% | 1.0% | 79 / 13 / +58% |
+| W3 Milly | 0.660 | 1.6% | 0.9% | 35 / 2 / -53% |
+| W4 Milly | 0.522 | 0.2% | 1.1% | 41 / 3 / -45% |
+| W5 Milly | 0.639 | 1.0% | 1.1% | 41 / 4 / -45% |
+| SNF Showdown | 0.593 | 0.5% | 1.2% | 56 / 3 / -26% |
+| MNF Showdown | 0.574 | 0.0% | 1.1% | 33 / 2 / -54% |
+
+- **Our picks beat the average entry but still lose money.** Over the
+  seven contests our 150-lineup portfolios cashed 31% of the time (22% is
+  average) and finished top 1% at 2.9% (1% is average), and still lost 28%
+  of fees. A Milly pays about 36% of its pool to 1st; our best finish in
+  1,050 entries was 57th. The sim's ROI (+13% to +550%) averages over rare
+  1st places, which a handful of slates seldom includes.
+- **The field isn't the problem.** Real entries beat our field's top-1%
+  line 0.9-1.2% of the time, and scored on the real results our field
+  reaches the real field's top scores.
+- **Contest chalkiness.** The power on projected ownership that best fits
+  each contest's real ownership was 0.85-1.15 for the Millys and 0.95-1.0
+  for the Showdowns: these big contests played like their projections.
+  For contests that don't, a `field_sharpen` column in the contests CSV
+  gives them their own field (above 1 = chalkier); `backtest` prints the
+  fitted power for each contest you add.
+- **Tried, not adopted:**
+  - *A ranking learned from past results* (our sim's top-1% chance plus
+    projection, ownership and salary; trained on four Millys, tested on
+    the fifth): AUC 0.634 -> 0.584, and fewer real winners in the top 5%.
+    The weights flipped sign week to week.
+  - *Down-weighting the most contrarian lineups.* Our sim does over-rate
+    the least-owned fifth (0.73% predicted top-1% vs 0.44% real, in 5 of 7
+    contests), but correcting for it was neutral: 150 entries, 339 vs 321
+    cashes, 28 vs 30 top-1%, the same winnings.
+  - *Contrarian candidates* (`--leftover-share 0.25 --own-penalty-share
+    0.25`): 150 entries, 331 cashes but 19 top-1% finishes (vs 30), and
+    $1.1k less won. Off by default.
 
 ### Learning from past contests (`field-study`)
 

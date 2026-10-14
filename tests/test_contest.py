@@ -543,3 +543,39 @@ def test_classic_field_spends_salary_like_real_fields():
     assert 0.35 < (sal == 50_000).mean() < 0.65 and (sal >= 49_800).mean() > 0.75 and (sal >= 49_500).mean() > 0.9
     flat = cs.generate_field(df, 4000, seed=3, min_salary=49_000) @ df["salary"].to_numpy(dtype=float)
     assert flat.min() >= 49_000 and (flat >= 49_800).mean() < (sal >= 49_800).mean()  # an explicit floor still wins
+
+
+def test_leftover_and_ownership_penalty_candidates():
+    df = _value_owned_pool()
+    scores = simulate_player_scores(df, n_trials=400, seed=17)
+    plain = cs.generate_candidates(df, scores, 40, seed=17)
+    spare = cs.generate_candidates(df, scores, 40, seed=17, leftover_share=1.0, leftover_caps=(48_000,))
+    assert all(c.salary_used <= 48_000 for c in spare)
+    assert np.mean([c.salary_used for c in spare]) < np.mean([c.salary_used for c in plain])
+    lev = cs.generate_candidates(df, scores, 40, seed=17, own_penalty_share=1.0, own_penalty_max=1.0)
+    own = df["own"].to_numpy()
+    assert np.mean([own[c.player_ids].sum() for c in lev]) < np.mean([own[c.player_ids].sum() for c in plain])
+    p = df["proj"].to_numpy()
+    assert all(abs(c.projected_points - p[c.player_ids].sum()) < 1e-6 for c in lev)  # still reports plain projection
+
+
+def test_field_mixture_keeps_ownership_on_average():
+    df = _value_owned_pool()
+    f = cs.generate_field_mixture(df, 4000, own_sd=0.3, seed=19)
+    assert f.shape == (4000, len(df)) and (f.sum(axis=1) == 9).all()
+    realized = (f > 0).mean(axis=0)
+    target = df["own"].to_numpy() * 9 / df["own"].sum()
+    assert np.corrcoef(realized, target)[0, 1] > 0.85
+
+
+def test_global_exposure_caps_players_across_contests():
+    df, cands, res = _graded()
+    kw = dict(min_unique=1, tiered_caps=False, dst_cap=1.0, max_exposure=0.5)
+    first = cs.select_portfolio(df, cands, res, 6, **kw)
+    counts = np.zeros(len(df), dtype=int)
+    for i in first:
+        counts[cands[i].player_ids] += 1
+    second = cs.select_portfolio(df, cands, res, 6, prior_counts=counts, prior_n=len(first), **kw)
+    for i in second:
+        counts[cands[i].player_ids] += 1
+    assert counts.max() <= int(0.5 * (len(first) + len(second)))
