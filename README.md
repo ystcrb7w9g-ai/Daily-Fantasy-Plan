@@ -903,6 +903,11 @@ that section):
   - *Contrarian candidates* (`--leftover-share 0.25 --own-penalty-share
     0.25`): 150 entries, 331 cashes but 19 top-1% finishes (vs 30), and
     $1.1k less won. Off by default.
+  - *Ownership uncertainty* (`--field-own-sd 0.3`: the field built from
+    four ownership draws): the Millys about even (mean AUC 0.640 vs
+    0.634), both Showdowns worse (0.528 / 0.524 vs 0.593 / 0.574). 150
+    entries: 334 cashes, 30 top-1% finishes (the same), $0.2k less won.
+    Off by default.
 
 ### Learning from past contests (`field-study`)
 
