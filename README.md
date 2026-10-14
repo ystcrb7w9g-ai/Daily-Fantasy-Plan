@@ -908,6 +908,15 @@ that section):
     0.634), both Showdowns worse (0.528 / 0.524 vs 0.593 / 0.574). 150
     entries: 334 cashes, 30 top-1% finishes (the same), $0.2k less won.
     Off by default.
+  - *More sims* (`--eval-trials 50000 --holdout-trials 50000` instead of
+    5,000 + 3,000, with the same field and candidates; Showdowns on the
+    stat engine): mean ranking AUC 0.630 vs 0.632, no contest moving more
+    than 0.03. 150 entries: 322 vs 323 cashes, 26 vs 31 top-1% finishes,
+    $0.5k less won; the 1-entry pick was the same lineup in 5 of 7
+    contests. It took 7-10 minutes per contest instead of 2.5-4, so 5,000
+    stays the default. The sim's ROI for a single Milly lineup stays
+    unreliable either way: the same Week 4 lineup read -16% at 5,000 and
+    +366% at 50,000, from a few extra simulated 1st places.
 
 ### Learning from past contests (`field-study`)
 
