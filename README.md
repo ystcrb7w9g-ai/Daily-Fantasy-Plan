@@ -726,6 +726,31 @@ python -m dfs_engine.cli dk-run --pool sd_pool.csv --entries DKEntries.csv \
   projected at 79% and 69% rostered force at least 48% to play both. The
   rest of Sunday's gap (23% vs 15%) is SaberSim's QB ownership: 47.6% /
   42.0% projected FLEX for Huntley / Penix, vs 39.2% / 36.2% real.
+- **Which lineups the field copies (Week 6 TNF).** Our field matched the
+  real duplication overall (92% of 84k entries in a duplicated lineup;
+  the top two lineups 703 / 655 copies real, 668 / 602 ours) but not
+  *which* lineups: copies of the lineups our engine would play came out
+  at about half the real count (our TNF entry: 37 real, 4 expected; the
+  chalk alternative: 292 real, 22-35 expected). One cause: real players
+  stack the captain's team harder. Across SNF / MNF / TNF, 12.6-20.9% of
+  lineups were 5-1 (captain's team 5, other 1) and 9.5-12.3% were 2-4;
+  our fields had 11-13% and ~16%. The field now matches the three-contest
+  mean (`SHOWDOWN_CPT_TEAM_MIX`) and drops the one-team lineups DK doesn't
+  allow (0.5-0.8% of our draws had them). Fit on two contests and tested
+  on the third, the copy counts of the lineups we'd play moved closer to
+  real in all three (log-scale error 1.07 -> 0.96, rank correlation 0.51
+  -> 0.56), and the Showdown backtests ranked real entries a little
+  better (AUC 0.666 / 0.591 / 0.774 -> 0.670 / 0.605 / 0.786). Tried and
+  dropped: more optimizer noise (better on our candidates, but it halves
+  the copies of the most-played lineups), an optimizer slice tilted
+  toward players owned above their value (worse), and a lower QB-pairing
+  target (no gain: SNF and TNF paired QBs at our 0.6 odds ratio; their
+  extra both-QB lineups came from SaberSim's QB captain ownership, 13-20%
+  projected vs 9.5-14% real). The copy estimates for lineups we'd play
+  are still about half the real count (Thursday's two: 6 and 33 expected
+  now), so a duplicated pick's sim ROI is still optimistic; for a single
+  Showdown entry take the top-1% pick (`auto`), which doesn't depend on
+  copies.
 - **Ceiling vs the field.** `--objective ceiling` / `blend` (see Contest
   sim) rank lineups wholly or partly by how often they are the best
   lineup in a sim, the way SaberSim does. In the replays below that
@@ -891,6 +916,13 @@ that section):
   For contests that don't, a `field_sharpen` column in the contests CSV
   gives them their own field (above 1 = chalkier); `backtest` prints the
   fitted power for each contest you add.
+- **Week 6 TNF Showdown** (84k entries; stat engine, added after the
+  table): ranking AUC 0.774 (projection alone 0.740), 7.1% of the 5% we
+  rated best finished top 1%. 150 entries: 39 cashes, 4 top-1%, best
+  finish 14th, est. ROI +47%; SaberSim's 500 lineups: 22% cashed, best
+  finish 38th, est. -41%. The single entry we played was a judgment call
+  away from the engine's top-1% pick, chasing a less-duplicated lineup;
+  it finished 75,190th (the engine's pick: 40,406th; neither cashed).
 - **Tried, not adopted:**
   - *A ranking learned from past results* (our sim's top-1% chance plus
     projection, ownership and salary; trained on four Millys, tested on
