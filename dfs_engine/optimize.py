@@ -221,11 +221,13 @@ def solve_showdown(
     excluded_ids: set[int] | None = None,
     rules: ShowdownRules | None = None,
     max_salary: float = SALARY_CAP,
+    cpt_points: np.ndarray | None = None,
 ) -> LineupResult | None:
     """
     Showdown solve: each player gets two decision variables, FLEX and
     CAPTAIN (1.5x salary, 1.5x points), mutually exclusive, with exactly
-    1 captain + 5 flex chosen from the combined pool.
+    1 captain + 5 flex chosen from the combined pool. `cpt_points`
+    overrides the captain objective (default 1.5x `points`).
     """
     n = len(df)
     locked_ids = locked_ids or set()
@@ -233,7 +235,7 @@ def solve_showdown(
 
     salary = df["salary"].to_numpy().astype(float)
     cpt_salary = salary * 1.5
-    cpt_points = points * 1.5
+    cpt_points = points * 1.5 if cpt_points is None else np.asarray(cpt_points, dtype=float)
 
     # Variable layout: [flex_0..flex_{n-1}, cpt_0..cpt_{n-1}]
     c = np.concatenate([-points, -cpt_points])

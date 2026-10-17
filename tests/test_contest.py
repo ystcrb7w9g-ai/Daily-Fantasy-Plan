@@ -305,6 +305,19 @@ def test_showdown_field_matches_captain_and_flex_ownership_separately():
     assert cs.field_shares(plain, df)[1][0] < 0.15  # without it captains just follow overall ownership
 
 
+def test_solve_showdown_takes_separate_captain_points():
+    from dfs_engine.optimize import solve_showdown
+    df = _showdown_pool()
+    pts = df["proj"].to_numpy(dtype=float)
+    default = solve_showdown(df, pts)
+    cpt = 1.5 * pts
+    pick = int(np.argsort(-pts)[5])          # a lesser player, made the only sensible captain
+    cpt[pick] = 10 * cpt.max()
+    forced = solve_showdown(df, pts, cpt_points=cpt)
+    assert forced.captain_id == pick != default.captain_id
+    assert np.allclose(solve_showdown(df, pts, cpt_points=1.5 * pts).projected_points, default.projected_points)
+
+
 def test_showdown_field_spends_like_real_fields_and_slice_adds_duplicates():
     from collections import Counter
     df = _showdown_pool()
