@@ -305,6 +305,19 @@ def test_showdown_field_matches_captain_and_flex_ownership_separately():
     assert cs.field_shares(plain, df)[1][0] < 0.15  # without it captains just follow overall ownership
 
 
+def test_showdown_field_matches_captain_team_split_and_never_one_team():
+    df = _showdown_pool()
+    team = np.unique(df["team"].to_numpy(), return_inverse=True)[1]
+    target = (0.02, 0.10, 0.30, 0.38, 0.20)
+    field = cs.generate_field(df, 6000, fmt="showdown", seed=46, optimizer_share=cs.SHOWDOWN_OPTIMIZER_SHARE,
+                              optimizer_solves=100, cpt_team_mix=target)
+    cpt = np.argmax(field == 1.5, axis=1)
+    k = ((field > 0) & (team[None, :] == team[cpt][:, None])).sum(axis=1)
+    assert k.max() <= 5 and k.min() >= 1                   # both teams in every lineup (a DK rule)
+    split = np.bincount(k - 1, minlength=5) / len(k)
+    assert np.abs(split - np.array(target)).max() < 0.03   # whole field, optimizer slice included
+
+
 def test_solve_showdown_takes_separate_captain_points():
     from dfs_engine.optimize import solve_showdown
     df = _showdown_pool()

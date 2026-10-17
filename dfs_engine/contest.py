@@ -700,6 +700,7 @@ def generate_field(
     optimizer_noise: float = DEFAULT_OPTIMIZER_NOISE,
     structure: dict[str, float] | None = DEFAULT_FIELD_STRUCTURE,
     qb_pair_odds: float | None = SHOWDOWN_QB_PAIR_ODDS,
+    cpt_team_mix: tuple[float, ...] | None = None,
 ) -> np.ndarray:
     """
     Simulated opponent lineups as a (n_field, n_players) weight matrix
@@ -735,6 +736,12 @@ def generate_field(
       boosted) until the whole field, optimizer slice included, pairs them
       at the odds ratio `qb_pair_odds` (`SHOWDOWN_QB_PAIR_ODDS`, measured in
       a real Showdown); None = as drawn.
+    - Showdown team split: `cpt_team_mix` gives the target share of lineups
+      with 1..5 players from the captain's team (`SHOWDOWN_CPT_TEAM_MIX`,
+      measured in real Showdowns: they stack the captain's side harder than
+      independent draws do). The ownership-sampled lineups are resampled so
+      the whole field, optimizer slice included, matches it; lineups from
+      one team only (not allowed on DK) are dropped. None = as drawn.
     - Classic stacking: QB teammates' WR/TE get a `stack_boost` sampling
       weight, then lineups are resampled so the shares with 0 / 1 / 2+
       QB-stacked pass catchers match `stack_mix` (None = no resampling).
@@ -815,6 +822,18 @@ def generate_field(
         r2 = (1 - opt_frac) * on[:, 1].mean() + opt_frac * opt_pair[2]
         return both * max(1 - r1 - r2 + both, 1e-6) / max((r1 - both) * (r2 - both), 1e-6)
 
+    team_codes = pd.factorize(df["team"].to_numpy())[0]
+    use_split = fmt == "showdown" and cpt_team_mix is not None
+    if use_split:
+        split_mix = np.asarray(cpt_team_mix, dtype=float)
+        split_mix = split_mix / split_mix.sum()
+        if len(opt_block):  # the slice's own split, so the whole field hits the target
+            opt_cpt = np.argmax(opt_w == 1.5, axis=1)
+            k = ((opt_w > 0) & (team_codes[None, :] == team_codes[opt_cpt][:, None])).sum(axis=1)
+            opt_mix = np.bincount(np.clip(k, 1, 5) - 1, weights=opt_p, minlength=5)
+            split_mix = np.clip(split_mix - opt_frac * opt_mix, 0.0, None) / (1 - opt_frac)
+            split_mix = split_mix / split_mix.sum()
+
     use_mix = fmt == "classic" and stack_mix is not None
     if use_mix:
         mix = np.asarray(stack_mix, dtype=float)
@@ -867,7 +886,12 @@ def generate_field(
 
     def sample(weights, n):
         logw = np.log(weights)
-        need = _largest_remainder(mix, n) if use_mix else np.array([n])  # buckets sum to exactly n
+        if use_mix:  # buckets sum to exactly n
+            need = _largest_remainder(mix, n)
+        elif use_split:
+            need = _largest_remainder(split_mix, n)
+        else:
+            need = np.array([n])
         buckets = [[] for _ in need]
         have = np.zeros(len(need), dtype=int)
         for i in range(500):
@@ -883,7 +907,12 @@ def generate_field(
             if len(ids) == 0:
                 continue
             w = _ids_to_weights(ids, cpt, n_players)
-            bucket = np.minimum(_qb_stack_counts(ids, df), 2) if use_mix else np.zeros(len(w), dtype=int)
+            if use_mix:
+                bucket = np.minimum(_qb_stack_counts(ids, df), 2)
+            elif use_split:  # players from the captain's team, 1..5 -> 0..4 (6 = one team: dropped)
+                bucket = (team_codes[ids] == team_codes[ids[:, :1]]).sum(axis=1) - 1
+            else:
+                bucket = np.zeros(len(w), dtype=int)
             for k in range(len(need)):
                 if have[k] < need[k]:
                     sel = w[bucket == k][: need[k] - have[k]]
