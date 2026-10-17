@@ -335,12 +335,12 @@ def test_showdown_field_spends_like_real_fields_and_slice_adds_duplicates():
     from collections import Counter
     df = _showdown_pool()
     sal = df["salary"].to_numpy(dtype=float)
-    field = cs.generate_field(df, 4000, fmt="showdown", seed=45)
+    field = cs.generate_field(df, 4000, fmt="showdown", seed=45, cpt_team_mix=None)  # the floors alone
     spent = field @ sal
     assert (spent >= 49_500).mean() > 0.25 and (spent >= 45_000).all()
     top = lambda f: max(Counter(map(bytes, (2 * f).astype(np.uint8))).values())  # noqa: E731  (captain-aware)
     sliced = cs.generate_field(df, 4000, fmt="showdown", seed=45, optimizer_share=cs.SHOWDOWN_OPTIMIZER_SHARE,
-                               optimizer_solves=200)
+                               optimizer_solves=200, cpt_team_mix=None)
     assert top(sliced) > 1.5 * top(field)  # the optimizer's favorite builds pile up, as in real Showdowns
 
 
@@ -434,9 +434,12 @@ def test_showdown_field_pairs_starting_qbs_at_the_target_odds_ratio():
         on = f[:, qbs] > 0
         b, r1, r2 = on.all(axis=1).mean(), on[:, 0].mean(), on[:, 1].mean()
         return b * (1 - r1 - r2 + b) / ((r1 - b) * (r2 - b))
-    loose = cs.generate_field(df, 6000, fmt="showdown", seed=46, min_salary=40_000, qb_pair_odds=None)
+    # team split off: this 14-player pool can't hold the real-field split and these odds at once
+    loose = cs.generate_field(df, 6000, fmt="showdown", seed=46, min_salary=40_000, qb_pair_odds=None,
+                              cpt_team_mix=None)
     for target in (0.45, 1.3):
-        f = cs.generate_field(df, 6000, fmt="showdown", seed=46, min_salary=40_000, qb_pair_odds=target)
+        f = cs.generate_field(df, 6000, fmt="showdown", seed=46, min_salary=40_000, qb_pair_odds=target,
+                              cpt_team_mix=None)
         assert abs(np.log(odds(f) / target)) < abs(np.log(odds(loose) / target))
         assert abs(np.log(odds(f) / target)) < np.log(1.35)
         assert np.abs(cs.field_shares(f, df)[0] + cs.field_shares(f, df)[1] - df["own"]).max() < 0.08

@@ -624,6 +624,14 @@ DEFAULT_OPTIMIZER_NOISE = 0.18
 # and captains drawn from FLEX ownership, the field had 22 / 7 / 5.
 SHOWDOWN_OPTIMIZER_SHARE = 0.25
 SHOWDOWN_OPTIMIZER_SOLVES = 2000
+# Share of Showdown lineups with 1 / 2 / 3 / 4 / 5 players from the captain's
+# team, mean of the 2026 Week 5 SNF and MNF and Week 6 TNF fields (78-88k
+# entries each; 5-1 builds 12.6-20.9%, 2-4 9.5-12.3%). Sampled from ownership
+# alone, our fields had 11-13% 5-1 and ~16% 2-4. Matching it (fit on two
+# contests, tested on the third) brought the field's copy counts of the
+# lineups we'd play closer to the real ones in all three: log-scale error
+# 1.07 -> 0.96, rank correlation 0.51 -> 0.56.
+SHOWDOWN_CPT_TEAM_MIX = (0.013, 0.111, 0.349, 0.357, 0.170)
 # `blend` objective default: weight on the field-free ceiling (how often a
 # lineup is the best candidate in a sim) vs the top-1% chance against the field.
 DEFAULT_CEILING_WEIGHT = 0.5
@@ -700,7 +708,7 @@ def generate_field(
     optimizer_noise: float = DEFAULT_OPTIMIZER_NOISE,
     structure: dict[str, float] | None = DEFAULT_FIELD_STRUCTURE,
     qb_pair_odds: float | None = SHOWDOWN_QB_PAIR_ODDS,
-    cpt_team_mix: tuple[float, ...] | None = None,
+    cpt_team_mix: tuple[float, ...] | None = SHOWDOWN_CPT_TEAM_MIX,
 ) -> np.ndarray:
     """
     Simulated opponent lineups as a (n_field, n_players) weight matrix
@@ -899,6 +907,12 @@ def generate_field(
                 break
             if i == 40 and have.sum() < 0.05 * need.sum():
                 break  # hopeless (salary floor / stack mix unreachable); fail fast
+            if use_split and i and i % 60 == 0:  # a split this pool won't reach in time: hand its share to the others
+                short = have + have / i * (500 - i) < need
+                if short.any() and not short.all():
+                    extra = int((need - have)[short].sum())
+                    need = np.where(short, have, need)
+                    need[~short] += _largest_remainder(split_mix[~short], extra)
             ids, cpt, ok = draw(logw, floor_for(batch))
             if qb_pair is not None and pair_accept != 1.0:
                 keep_p = np.where(both_qbs(ids), min(1.0, pair_accept), min(1.0, 1.0 / pair_accept))
