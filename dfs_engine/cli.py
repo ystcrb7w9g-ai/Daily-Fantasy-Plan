@@ -1178,6 +1178,12 @@ def cmd_review(args: argparse.Namespace) -> None:
         contests["contest_id"] = contests["contest_id"].astype(str)
         payouts = {r["contest_id"]: _contest_payout(r) for r in contests.to_dict("records")}
     nfl = _nflverse(args) if args.week else {}
+    if nfl:
+        from .ownership_model import schedule_lines
+        if schedule_lines(nfl["games"], args.season, args.week).empty:
+            print(f"Note: the nflverse data on disk has no {args.season} week {args.week} games with lines "
+                  "(--refresh-nflverse updates it); skipping the field-structure and own_model steps.")
+            nfl = {}
 
     print(f"=== Contests ({len(raws)}) ===")
     rows = []
