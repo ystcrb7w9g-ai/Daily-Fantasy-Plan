@@ -930,6 +930,15 @@ that section):
   -76%. Even the 150-entry players had a top-1% rate of 0.64% vs 1.11% for
   casual players. Our real entries (191 lineups across four contests,
   scored on the Milly's points): 18% above its cash line, 1% top-1%.
+- **Week 7 SNF Showdown** (78k entries): ranking AUC 0.749, but
+  projection alone did better (0.839); 24.8% of the 1% we rated best
+  finished top 1%, many of them copies of the 2nd-best score. The
+  engine's top two candidates were a coin flip (top-1% 2.80% vs 2.70%):
+  #1 scored 77.4 (48,122nd; 45 real copies vs ~4 expected), #2 scored
+  117.06, the second-best score of the night (313 real copies; 196
+  expected). The entry actually played (built by hand, rated 0.66% by
+  our sim) finished 3,273rd and cashed. 150 entries: 28 cashes, 2
+  top-1%, est. -33%; SaberSim's 5,000 lineups: 14% cashed, 0.2% top-1%.
 - **Tried, not adopted:**
   - *A ranking learned from past results* (our sim's top-1% chance plus
     projection, ownership and salary; trained on four Millys, tested on
