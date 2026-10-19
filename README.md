@@ -923,6 +923,13 @@ that section):
   finish 38th, est. -41%. The single entry we played was a judgment call
   away from the engine's top-1% pick, chasing a less-duplicated lineup;
   it finished 75,190th (the engine's pick: 40,406th; neither cashed).
+- **Week 7 Milly** (159k entries; added after the table): a chalk-bust
+  week. Ranking AUC 0.575 (projection alone 0.530), and only 0.3% of the
+  5% we rated best finished top 1%. 150 entries: 26 cashes, no top-1%,
+  est. -65%; SaberSim's 5,034 lineups: 12% cashed, 0.4% top-1%, est.
+  -76%. Even the 150-entry players had a top-1% rate of 0.64% vs 1.11% for
+  casual players. Our real entries (191 lineups across four contests,
+  scored on the Milly's points): 18% above its cash line, 1% top-1%.
 - **Tried, not adopted:**
   - *A ranking learned from past results* (our sim's top-1% chance plus
     projection, ownership and salary; trained on four Millys, tested on
