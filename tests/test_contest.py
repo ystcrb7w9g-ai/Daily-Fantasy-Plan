@@ -319,6 +319,18 @@ def test_showdown_field_matches_captain_team_split_and_never_one_team():
     assert np.abs(split - np.array(target)).max() < 0.03   # whole field, optimizer slice included
 
 
+def test_stretch_spread_widens_a_position_and_keeps_means_and_ranks():
+    from dfs_engine.simulate import stretch_spread
+    rng = np.random.default_rng(1)
+    s = np.column_stack([rng.gamma(4.0, 3.0, 20000), rng.gamma(4.0, 3.0, 20000), rng.gamma(2.0, 2.0, 20000)])
+    out = stretch_spread(s, ["WR", "WR", "RB"], {"WR": 1.2})
+    assert out is not s and np.array_equal(out[:, 2], s[:, 2])            # other positions untouched
+    assert np.allclose(out[:, :2].mean(axis=0), s[:, :2].mean(axis=0), rtol=0.01)
+    assert np.allclose(out[:, :2].std(axis=0) / s[:, :2].std(axis=0), 1.2, atol=0.02)
+    assert (out >= 0).all() and (np.argsort(out[:, 0]) == np.argsort(s[:, 0])).mean() > 0.99
+    assert stretch_spread(s, ["WR", "WR", "RB"], {}) is s
+
+
 def test_scale_ownership_moves_a_positions_share_and_keeps_totals():
     df = pd.DataFrame({"position": ["QB", "QB", "WR", "WR", "RB"], "own": [60.0, 50.0, 40.0, 30.0, 20.0]})
     out = cs.scale_ownership(df, {"QB": 0.8})

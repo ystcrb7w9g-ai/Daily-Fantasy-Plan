@@ -68,7 +68,7 @@ import numpy as np
 import pandas as pd
 
 from .data import load_player_pool, validate_showdown_pool
-from .simulate import DEFAULT_SPREAD_SCALE, TD_MODEL, percentile_mask, simulate_player_scores
+from .simulate import DEFAULT_SPREAD_SCALE, TD_MODEL, percentile_mask, simulate_player_scores, stretch_spread
 from .optimize import ShowdownRules, StackRules
 from .outcomes import player_outcomes
 from . import contest as cs
@@ -142,11 +142,13 @@ def _sim_knobs(args: argparse.Namespace) -> dict:
 
 def _simulate(df: pd.DataFrame, args: argparse.Namespace, n_trials: int, seed) -> np.ndarray:
     spread = args.spread_scale if args.spread_scale is not None else DEFAULT_SPREAD_SCALE
-    return simulate_player_scores(
+    scores = simulate_player_scores(
         df, n_trials=n_trials, seed=seed,
         calibrate_ceiling=not args.no_ceiling_calibration, ceiling_pct=args.ceiling_pct,
         spread_scale=spread, **_sim_knobs(args),
     )
+    stretch = _parse_pos_scales(getattr(args, "pos_spread", None))
+    return stretch_spread(scores, df["position"].to_numpy(), stretch) if stretch else scores
 
 
 def _fit_spread(df: pd.DataFrame, field: np.ndarray, args: argparse.Namespace) -> None:
@@ -422,6 +424,9 @@ def _add_model_args(p: argparse.ArgumentParser) -> None:
                         "rescaled to the same total, before the field is built")
     p.add_argument("--cpt-own-scale", default=None, metavar="POS=F[,POS=F]",
                    help="Showdown: the same for captain ownership (e.g. QB=0.75)")
+    p.add_argument("--pos-spread", default=None, metavar="POS=K[,POS=K]",
+                   help="widen (K>1) or narrow (K<1) these positions' simulated outcomes around each "
+                        "player's mean, e.g. WR=1.1; means and correlations stay the same")
     _add_exposure_args(p)
     _add_sim_args(p)
     _add_stack_args(p)
@@ -799,6 +804,9 @@ def model_slate(df: pd.DataFrame, args: argparse.Namespace, total: int) -> Slate
               + (" -- the Showdown default; --engine factor for the factor model" if args.engine == "auto" else ""))
     elif _sim_knobs(args):
         print("  TD model on (default; --classic-sim for the old knobs): shared team TDs, knobs refit to real pairs")
+    if getattr(args, "pos_spread", None):
+        print("  simulated spread stretched around each player's mean: " + ", ".join(
+            f"{p} x{k:g}" for p, k in _parse_pos_scales(args.pos_spread).items()))
     _apply_exposure_flags(df, args)
     _exposure_note(df)
     _apply_own_scales(df, args, showdown)

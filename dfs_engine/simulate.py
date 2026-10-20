@@ -154,6 +154,25 @@ def touchdown_points(df: pd.DataFrame, team_points: np.ndarray, player_team_idx:
     return out - out.mean(axis=0, keepdims=True)
 
 
+def stretch_spread(scores: np.ndarray, positions, factors: dict[str, float]) -> np.ndarray:
+    """Widen (k > 1) or narrow (k < 1) each listed position's simulated outcomes around the
+    player's simulated mean: s -> mean + k * (s - mean). His mean and his rank in every sim stay
+    the same, so every correlation does too; scores never drop below min(0, the sim's lowest)."""
+    pos = np.asarray(positions)
+    out = scores
+    for p, k in factors.items():
+        cols = np.flatnonzero(pos == p)
+        if not len(cols) or k == 1.0:
+            continue
+        if out is scores:
+            out = scores.copy()
+        block = out[:, cols]
+        mu = block.mean(axis=0, keepdims=True)
+        floor = np.minimum(block.min(axis=0, keepdims=True), 0.0)
+        out[:, cols] = np.maximum(mu + k * (block - mu), floor)
+    return out
+
+
 def percentile_mask(df: pd.DataFrame) -> np.ndarray:
     """Players with a full set of provided percentiles (and a positive projection)."""
     cols = list(PERCENTILE_LEVELS)
