@@ -939,6 +939,20 @@ that section):
   expected). The entry actually played (built by hand, rated 0.66% by
   our sim) finished 3,273rd and cashed. 150 entries: 28 cashes, 2
   top-1%, est. -33%; SaberSim's 5,000 lineups: 14% cashed, 0.2% top-1%.
+- **What real winners looked like** (every entry of the ten contests we
+  could map, with the projections and ownership we had at lock; W1-W4
+  map only 65-81% of entries, the rest 97-99%):
+  - *Showdown:* lineups at $48.5k or less finished top 1% at 0.3-0.6x
+    the average rate and won less than the field in all four games. WR
+    captains beat the field in all four; RB captains trailed in all four.
+  - *Both formats:* the least-owned fifth of lineups finished top 1% at
+    about half the average rate (Classic 0.5x, Showdown 0.3x), even next
+    to lineups with the same projection. Ownership barely predicts a
+    player's points beyond his projection (correlation 0.03), so the
+    field's contrarian lineups are mostly weak ones.
+  - *Classic:* QB + 2 receivers finished top 1% at 1.5x the average vs
+    1.0x for QB + 1 (5 of 6 weeks); 150-entry accounts at 1.4x,
+    single-entry players at 0.84x.
 - **Tried, not adopted:**
   - *A ranking learned from past results* (our sim's top-1% chance plus
     projection, ownership and salary; trained on four Millys, tested on
@@ -965,6 +979,15 @@ that section):
     stays the default. The sim's ROI for a single Milly lineup stays
     unreliable either way: the same Week 4 lineup read -16% at 5,000 and
     +366% at 50,000, from a few extra simulated 1st places.
+  - *Looser or stricter Classic stacking* (six Millys, seed 7, the usual
+    flags otherwise): `--max-per-game 5`, `--max-per-team 4
+    --max-per-game 5`, and strict QB + 2 with a bring-back (no
+    `--flex-stacks`), prompted by the five-player game stacks that won
+    the two shootout weeks. 150 entries: 280 cashes / 23 top-1% for the
+    current rules vs 266 / 23, 272 / 23, and 197 / 21 for strict, which
+    fills only 112 lineups a slate under the 40% exposure cap. Totals
+    hinge on one W2 2nd place ($100k) that only the current rules and
+    `--max-per-game 5` found. The current rules stay.
 
 ### Learning from past contests (`field-study`)
 
