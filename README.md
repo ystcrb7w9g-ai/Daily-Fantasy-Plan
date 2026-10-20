@@ -1021,6 +1021,17 @@ that section):
     the 5% we rated best (3 of 4), and the picks were mixed (150 entries:
     +2.5 cashes but -1 top-1% finish a slate). Unclear on four games: the
     flags stay, off by default, for a re-test as Showdowns come in.
+  - *Wider WR outcomes* (`--pos-spread WR=K`). Real WR scores spread
+    wider than our sims: above the sim's 85th percentile in 15-25% of
+    cases in all ten contests, and below its median about 55% of the time
+    in all six Millys (other positions mixed; whole games boomed together
+    about as often as simulated, 1.07x). Each contest's K was fit on the
+    other nine (1.08-1.15) and tested on it. The Millys' forecast scores
+    improved slightly (log skill +0.001, better in 4 of 6), but the
+    150-entry sets cashed 4.5 fewer times a slate (fewer in 5 of 6) and
+    finished lower; the Showdowns were slightly worse on the forecast
+    scores. Not adopted: a sim that matches players' ranges better can
+    still pick worse lineups.
 
 ### Learning from past contests (`field-study`)
 
