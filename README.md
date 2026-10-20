@@ -1011,6 +1011,16 @@ that section):
     fills only 112 lineups a slate under the 40% exposure cap. Totals
     hinge on one W2 2nd place ($100k) that only the current rules and
     `--max-per-game 5` found. The current rules stay.
+  - *Showdown QB ownership correction* (`--own-scale QB=F --cpt-own-scale
+    QB=F`). SaberSim projected the two QBs above their real ownership in
+    all four Showdowns (FLEX 0.84-0.98 of projected, captain 0.71-0.94).
+    Each game's factors were fit on the other three, shrunk toward no
+    correction (FLEX 0.91-0.95, captain 0.76-0.84), and tested on the
+    held-out game with `backtest-compare`. Forecast scores rose in 3 of 4
+    (log skill +0.003, AUC +0.012), but fewer real top-1% entries landed in
+    the 5% we rated best (3 of 4), and the picks were mixed (150 entries:
+    +2.5 cashes but -1 top-1% finish a slate). Unclear on four games: the
+    flags stay, off by default, for a re-test as Showdowns come in.
 
 ### Learning from past contests (`field-study`)
 
