@@ -2,6 +2,7 @@ import os
 import sys
 
 import numpy as np
+import pandas as pd
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(__file__))
@@ -316,6 +317,13 @@ def test_showdown_field_matches_captain_team_split_and_never_one_team():
     assert k.max() <= 5 and k.min() >= 1                   # both teams in every lineup (a DK rule)
     split = np.bincount(k - 1, minlength=5) / len(k)
     assert np.abs(split - np.array(target)).max() < 0.03   # whole field, optimizer slice included
+
+
+def test_scale_ownership_moves_a_positions_share_and_keeps_totals():
+    df = pd.DataFrame({"position": ["QB", "QB", "WR", "WR", "RB"], "own": [60.0, 50.0, 40.0, 30.0, 20.0]})
+    out = cs.scale_ownership(df, {"QB": 0.8})
+    assert abs(out.sum() - 200.0) < 1e-9 and np.allclose(out[:2], [48.0, 40.0])
+    assert np.allclose(out[2:], np.array([40.0, 30.0, 20.0]) * 112 / 90)  # the QBs' 22 points spread pro rata
 
 
 def test_solve_showdown_takes_separate_captain_points():

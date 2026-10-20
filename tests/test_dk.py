@@ -575,10 +575,12 @@ def test_showdown_pool_to_dk_run_with_sabersim_lineups():
                           "--entries", path, "--candidates", "30", "--gen-trials", "200", "--eval-trials", "300",
                           "--holdout-trials", "200", "--field-size", "1500", "--field-optimizer-solves", "100",
                           "--min-unique", "1", "--seed", "4", "--upload-out", up, "--extra-lineups", saber,
-                          "--qb-stack", "2", "--max-game-stack-share", "0.5"],
+                          "--qb-stack", "2", "--max-game-stack-share", "0.5",
+                          "--own-scale", "QB=0.8", "--cpt-own-scale", "QB=0.7"],
                          cwd=ROOT, capture_output=True, text=True)
     assert res.returncode == 0, res.stderr + res.stdout
     out = res.stdout
+    assert "ownership scaled: FLEX QB x0.8, CPT QB x0.7" in out
     assert "Showdown: ATL vs NO" in out and "field captains:" in out and "25% of the field" in out
     assert "stat engine: simulated box scores" in out  # --engine auto: box scores for Showdown
     assert "Classic only" in out and "+1 of 1 lineups from lineups_dk_nfl_showdown.csv" in out

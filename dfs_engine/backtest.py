@@ -300,6 +300,50 @@ def _real_sample(slate: Slate, n_sample: int, seed: int):
     return _weights(list(uniq), len(slate.df)), inv, slate.points[idx], ok.mean()
 
 
+# Proper scores of our top-1% chances: each lineup's sim rate is shrunk toward the 1% base rate by
+# PRIOR_SIMS pseudo-sims, and floored, so a lineup we never saw finish top 1% isn't scored as impossible.
+BASE_RATE = 0.01
+PRIOR_SIMS = 100
+P_FLOOR = 1e-4
+
+
+def _calibration_fit(p: np.ndarray, y: np.ndarray, iters: int = 50) -> tuple[float, float]:
+    """Logistic regression of the real outcome on logit(predicted chance): (intercept, slope).
+    Calibrated forecasts give (0, 1); a slope below 1 means we spread our chances too far apart."""
+    if y.sum() == 0 or y.sum() == len(y):
+        return float("nan"), float("nan")
+    x = np.log(p / (1 - p))
+    X = np.column_stack([np.ones_like(x), x])
+    w = np.array([0.0, 1.0])
+    yf = y.astype(float)
+    for _ in range(iters):
+        mu = 1.0 / (1.0 + np.exp(-np.clip(X @ w, -30, 30)))
+        H = (X * (mu * (1 - mu))[:, None]).T @ X + 1e-9 * np.eye(2)
+        step = np.linalg.solve(H, X.T @ (yf - mu))
+        w = w + step
+        if np.abs(step).max() < 1e-9:
+            break
+    return float(w[0]), float(w[1])
+
+
+def proper_scores(hits: np.ndarray, n_sims: int, y: np.ndarray) -> dict:
+    """How well our predicted top-1% chances (top-1% finishes in `n_sims` sims) forecast which real
+    entries finished top 1% (`y`). Skill scores compare with forecasting the base rate for every
+    entry: above 0 is better than that, 1 is perfect. Log skill rewards putting probability on the
+    lineups that actually won; Brier skill is the gentler squared-error version."""
+    y = np.asarray(y, dtype=bool)
+    p = np.clip((np.asarray(hits, dtype=float) + PRIOR_SIMS * BASE_RATE) / (n_sims + PRIOR_SIMS),
+                P_FLOOR, 1 - P_FLOOR)
+    base = float(np.clip(y.mean(), P_FLOOR, 1 - P_FLOOR))
+    ll = float(np.where(y, np.log(p), np.log1p(-p)).mean())
+    ll0 = float(np.where(y, np.log(base), np.log1p(-base)).mean())
+    br, br0 = float(((p - y) ** 2).mean()), float(((base - y) ** 2).mean())
+    a, b = _calibration_fit(p, y)
+    return {"log_score": ll, "log_skill": 1 - ll / ll0 if ll0 else float("nan"),
+            "brier_skill": 1 - br / br0 if br0 else float("nan"),
+            "calibration_intercept": a, "calibration_slope": b}
+
+
 def rank_real_entries(slate: Slate, field: np.ndarray, scores: np.ndarray, n_sample: int = 40_000,
                       seed: int = 7, batch: int = 250) -> dict:
     """How well our sims pick out the real entries that finished top 1%, and how strong our
@@ -328,6 +372,7 @@ def rank_real_entries(slate: Slate, field: np.ndarray, scores: np.ndarray, n_sam
     out = {"mapped_share": float(mapped), "sampled": int(len(pts)), "real_top1": int(y.sum()),
            "auc_top1": _auc(p, y), "auc_projection": _auc(lineup_proj, y), "auc_low_ownership": _auc(-lineup_own, y),
            "spearman_points": float(pd.Series(p).corr(pd.Series(pts), method="spearman"))}
+    out.update(proper_scores(hits[inv], len(scores), y))
     for frac in (0.01, 0.05):
         best = p >= np.quantile(p, 1 - frac)
         out[f"real_top1_in_best_{int(frac * 100)}pct"] = float(y[best].mean())
@@ -449,6 +494,9 @@ def replay(slate: Slate, args, n_lineups=(1, 20, 150), quiet: bool = True) -> di
         real_pts = np.sort(m.field @ slate.actual)
         real_pts = np.interp(np.linspace(0, len(real_pts) - 1, slate.size), np.arange(len(real_pts)), real_pts)
     paid = int((real_table > 0).sum())
+    # The same table with every prize above 11th place cut to 11th's: winnings that one lucky
+    # 1st place can't swing, for comparing settings on a handful of contests.
+    capped_table = np.minimum(real_table, real_table[min(10, len(real_table) - 1)])
     out = {"objective": _objective_text(args, engine_pay.contest_size), "candidates": len(m.candidates),
            "finishes_estimated": estimated, "picks": {}, "model": m, "candidate_points": cand_pts}
     for n in n_lineups:
@@ -459,6 +507,8 @@ def replay(slate: Slate, args, n_lineups=(1, 20, 150), quiet: bool = True) -> di
                "sim_roi_holdout": float(cs.portfolio_summary(hold, chosen, slate.spec.entry_fee)["roi"])}
         if real_pts is not None:
             ranks, prizes = place_in_contest(real_pts, pts, real_table)
+            _, capped = place_in_contest(real_pts, pts, capped_table)
+            rec.update({"won_capped": float(capped.sum()), "median_finish_pct": float(np.median(ranks) / len(real_pts))})
             fees = slate.spec.entry_fee * len(chosen)
             rec.update({"best_finish": int(ranks.min()), "cashes": int((ranks <= paid).sum()),
                         "top1": int((ranks <= 0.01 * slate.size).sum()), "won": float(prizes.sum()),
@@ -541,6 +591,8 @@ def summarize(results: list[dict], n_lineups=(1, 20, 150)) -> dict[str, pd.DataF
                               "AUC top-1%": g["auc_top1"], "AUC projection": g["auc_projection"],
                               "real top-1% in best 1%": g["real_top1_in_best_1pct"],
                               "real top-1% in best 5%": g["real_top1_in_best_5pct"],
+                              "log skill": g.get("log_skill"), "Brier skill": g.get("brier_skill"),
+                              "calibration slope": g.get("calibration_slope"),
                               "predicted top-1% (real is 1%)": g["predicted_top1_mean"],
                               "top-1% line: our field / real": g["top1_line_field"] / g["top1_line_real"]})
         f = r.get("field") or {}
@@ -556,6 +608,7 @@ def summarize(results: list[dict], n_lineups=(1, 20, 150)) -> dict[str, pd.DataF
             pick_rows.append({"slate": r["label"], "entries": p["n"], "median pts": p["median"], "best pts": p["best"],
                               "best finish": p.get("best_finish"), "cashes": p.get("cashes"), "top-1%": p.get("top1"),
                               "fees": p.get("fees"), "won": p.get("won"), "real ROI": p.get("real_roi"),
+                              "won (capped at 11th)": p.get("won_capped"), "median finish %": p.get("median_finish_pct"),
                               "sim ROI (holdout)": p["sim_roi_holdout"]})
         for e in r["replay"].get("extra", []):
             extra_rows.append({"slate": r["label"], "file": e["file"], "lineups": e["n"], "median pts": e["median"],
@@ -564,6 +617,61 @@ def summarize(results: list[dict], n_lineups=(1, 20, 150)) -> dict[str, pd.DataF
                                "our rank (median)": e["our_rank_median"]})
     return {"ranking": pd.DataFrame(rank_rows), "field": pd.DataFrame(field_rows),
             "picks": pd.DataFrame(pick_rows), "extra": pd.DataFrame(extra_rows)}
+
+
+def load_results(dirs) -> list[dict]:
+    """The per-slate results saved by `save` in one or more backtest output folders."""
+    out = []
+    for d in ([dirs] if isinstance(dirs, str) else dirs):
+        with open(os.path.join(d, "backtest.json")) as fh:
+            out += json.load(fh)
+    return out
+
+
+# (key, label, +1 if higher is better / -1 if lower is better)
+RANK_METRICS = [("log_skill", "log skill", 1), ("brier_skill", "Brier skill", 1), ("auc_top1", "AUC top-1%", 1),
+                ("real_top1_in_best_5pct", "real top-1% in best 5%", 1)]
+PICK_METRICS = [("cashes", "cashes", 1), ("top1", "top-1% finishes", 1), ("capped_roi", "ROI, prizes capped at 11th", 1),
+                ("median_finish_pct", "median finish %", -1)]
+
+
+def _pick_metric(r: dict, n: int, key: str):
+    picks = r["replay"]["picks"]
+    p = picks.get(n) or picks.get(str(n))
+    if not p:
+        return None
+    if key == "capped_roi":
+        return p["won_capped"] / p["fees"] - 1 if p.get("won_capped") is not None and p.get("fees") else None
+    return p.get(key)
+
+
+def compare(a: list[dict], b: list[dict], n_lineups=(1, 20, 150), n_boot: int = 10_000, seed: int = 0) -> pd.DataFrame:
+    """Variant B minus baseline A on every slate both ran: per-slate differences, their mean, a 90%
+    interval from resampling whole slates (a contest is the independent unit, not a lineup), how
+    many slates went each way, and a verdict that is "unclear" unless the interval excludes zero."""
+    A, B = {r["label"]: r for r in a}, {r["label"]: r for r in b}
+    labels = [lab for lab in A if lab in B]
+    getters = [(name, sign, lambda r, k=key: (r.get("ranking") or {}).get(k)) for key, name, sign in RANK_METRICS]
+    getters += [(f"{n} entries: {name}", sign, lambda r, k=key, n=n: _pick_metric(r, n, k))
+                for n in n_lineups for key, name, sign in PICK_METRICS]
+    rng = np.random.default_rng(seed)
+    rows = []
+    for name, sign, get in getters:
+        d = {}
+        for lab in labels:
+            va, vb = get(A[lab]), get(B[lab])
+            if va is not None and vb is not None and np.isfinite(va) and np.isfinite(vb):
+                d[lab] = float(vb) - float(va)
+        if not d:
+            continue
+        diffs = np.array(list(d.values()))
+        boot = diffs[rng.integers(0, len(diffs), (n_boot, len(diffs)))].mean(axis=1)
+        lo, hi = (float(x) for x in np.quantile(boot, [0.05, 0.95]))
+        good, bad = (lo > 0, hi < 0) if sign > 0 else (hi < 0, lo > 0)
+        rows.append({"metric": name, "slates": len(d), "mean B-A": float(diffs.mean()), "90% low": lo, "90% high": hi,
+                     "B better in": int((sign * diffs > 0).sum()), "B worse in": int((sign * diffs < 0).sum()),
+                     "verdict": "B better" if good else "B worse" if bad else "unclear", **d})
+    return pd.DataFrame(rows)
 
 
 def save(results: list[dict], out_dir: str) -> None:

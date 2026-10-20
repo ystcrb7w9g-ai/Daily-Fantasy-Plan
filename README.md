@@ -872,19 +872,42 @@ e.g. SaberSim's export, graded head to head and offered as candidates),
 1. **Ranking.** Our sims rank the contest's *real* entries (40k sampled):
    AUC for a real top-1% finish, and how many real top-1% entries land in
    the 1% / 5% we rate best. This is the most data-rich test: tens of
-   thousands of real lineups per slate.
+   thousands of real lineups per slate. It also scores our top-1% chances
+   as forecasts: *log skill* and *Brier skill* (0 = no better than giving
+   every entry 1%, 1 = perfect; log skill weighs putting probability on the
+   lineups that really won) and the *calibration slope* (1 = right, below
+   1 = our chances are spread too far apart).
 2. **Field.** Our simulated field next to the real one: projection,
    ownership, salary, stacking, duplication (chance two entries are the
    same lineup), and *field strength*: how often real entries beat our
    field's top-1% line (1% if our field is as strong as the real one).
 3. **Picks** for 1 / 20 / 150 entries, scored on the real results:
    finishes (ties split), cashes, top-1% finishes, estimated winnings from
-   a DK-style table anchored on the known top prizes, sim ROI vs real.
+   a DK-style table anchored on the known top prizes, sim ROI vs real. Two
+   steadier versions for comparing settings: winnings with every prize
+   above 11th place cut to 11th's (one lucky 1st can't swing them), and the
+   picks' median finish (% of the field).
 4. **Head to head:** the extra lineups' real results, and where our sim
    ranked them.
 
 `--keep-models DIR` also saves each slate's fitted model (field, sims,
 candidates) for trying other settings on it.
+
+**Comparing two settings** (`backtest-compare`). Run the backtest twice,
+the same seed and one change apart, then:
+
+```bash
+python -m dfs_engine.cli backtest-compare --a outputs/bt_base --b outputs/bt_variant --out compare.csv
+```
+
+For each score above it prints B minus A on every slate both runs share,
+the mean, a 90% interval from resampling whole slates (a contest is the
+independent unit, not a lineup: every lineup in it shares the same game
+results), how many slates went each way, and a verdict that stays
+"unclear" unless the interval excludes zero. Comma-separate folders to
+combine runs (e.g. one per slate when a setting is fit leave-one-out).
+A correction learned from real results has to be fit on the *other*
+slates before it's tested on one, or the test sees the answers.
 
 Our seven contests (the 2026 Week 1-5 Millionaire Makers, the Week 5 SNF
 and MNF Showdowns), with the factor model throughout (what every test

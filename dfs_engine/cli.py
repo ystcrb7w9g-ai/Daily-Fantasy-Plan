@@ -417,11 +417,47 @@ def _add_model_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--field-own-sd", type=float, default=0.0,
                    help="ownership uncertainty: build the field from several ownership draws, each player's "
                         "projected ownership times lognormal(0, this) (0 = treat projections as exact)")
+    p.add_argument("--own-scale", default=None, metavar="POS=F[,POS=F]",
+                   help="Showdown: multiply these positions' FLEX ownership (e.g. QB=0.85), everyone else "
+                        "rescaled to the same total, before the field is built")
+    p.add_argument("--cpt-own-scale", default=None, metavar="POS=F[,POS=F]",
+                   help="Showdown: the same for captain ownership (e.g. QB=0.75)")
     _add_exposure_args(p)
     _add_sim_args(p)
     _add_stack_args(p)
     _add_field_optimizer_args(p)
     _add_portfolio_args(p)
+
+
+def _parse_pos_scales(text: str | None) -> dict[str, float]:
+    """'QB=0.85,K=1.1' -> {'QB': 0.85, 'K': 1.1}."""
+    out = {}
+    for part in (text or "").split(","):
+        if not part.strip():
+            continue
+        pos, _, f = part.partition("=")
+        try:
+            out[pos.strip().upper()] = float(f)
+        except ValueError:
+            raise SystemExit(f"bad position scale '{part}' (want POS=FACTOR, e.g. QB=0.85)")
+    return out
+
+
+def _apply_own_scales(df: pd.DataFrame, args: argparse.Namespace, showdown: bool) -> None:
+    """--own-scale / --cpt-own-scale: correct a projection source's ownership by position."""
+    flex = _parse_pos_scales(getattr(args, "own_scale", None))
+    cpt = _parse_pos_scales(getattr(args, "cpt_own_scale", None))
+    if not (flex or cpt):
+        return
+    if not showdown:
+        print("Note: --own-scale / --cpt-own-scale are Showdown only (Classic fills fixed slots); ignoring.")
+        return
+    if flex:
+        df["own"] = cs.scale_ownership(df, flex, "own")
+    if cpt and cs.captain_ownership(df) is not None:
+        df["cpt_own"] = cs.scale_ownership(df, cpt, "cpt_own")
+    parts = [f"FLEX {p} x{f:g}" for p, f in flex.items()] + [f"CPT {p} x{f:g}" for p, f in cpt.items()]
+    print("  ownership scaled: " + ", ".join(parts) + " (everyone else rescaled to the same totals)")
 
 
 def _parse_stack_mix(text: str):
@@ -765,6 +801,7 @@ def model_slate(df: pd.DataFrame, args: argparse.Namespace, total: int) -> Slate
         print("  TD model on (default; --classic-sim for the old knobs): shared team TDs, knobs refit to real pairs")
     _apply_exposure_flags(df, args)
     _exposure_note(df)
+    _apply_own_scales(df, args, showdown)
     min_exp, max_exp = cs.player_exposure_limits(df)
     banned = set(np.flatnonzero(max_exp <= 0).tolist())
 
@@ -1004,6 +1041,27 @@ def cmd_backtest(args: argparse.Namespace) -> None:
             print(f"  {n:>3} entries a slate: fees ${fees:,.0f}, est. won ${won:,.0f} "
                   f"(ROI {won / fees - 1:+.0%}), cashes {int(g['cashes'].sum())}, top-1% {int(g['top-1%'].sum())}")
     print(f"Wrote {args.out_dir}/backtest.json and summary CSVs")
+
+
+def cmd_backtest_compare(args: argparse.Namespace) -> None:
+    from . import backtest as bt
+    a = bt.load_results([x for x in args.a.split(",") if x])
+    b = bt.load_results([x for x in args.b.split(",") if x])
+    n_list = tuple(int(x) for x in args.lineups.split(","))
+    t = bt.compare(a, b, n_lineups=n_list, n_boot=args.boot, seed=args.seed)
+    if t.empty:
+        raise SystemExit("no slates in common between the two runs")
+    shared = int(t["slates"].max())
+    print(f"B ({args.b}) minus A ({args.a}) on {shared} shared slates; positive = B higher. "
+          "90% interval from resampling whole slates.")
+    if shared < 5:
+        print("  (fewer than 5 slates: treat the intervals as rough)")
+    cols = ["metric", "slates", "mean B-A", "90% low", "90% high", "B better in", "B worse in", "verdict"]
+    with pd.option_context("display.width", 200, "display.float_format", "{:+.4f}".format):
+        print(t[cols].to_string(index=False))
+    if args.out:
+        t.to_csv(args.out, index=False)
+        print(f"Wrote per-slate differences to {args.out}")
 
 
 def _now_eastern(text: str | None) -> pd.Timestamp:
@@ -1578,6 +1636,16 @@ def build_parser() -> argparse.ArgumentParser:
                       help="also pickle each slate's fitted model (field, sims, candidates) here")
     _add_model_args(p_bt)
     p_bt.set_defaults(func=cmd_backtest)
+
+    p_bc = sub.add_parser("backtest-compare",
+                          help="Compare two backtest runs slate by slate, with intervals from resampling slates")
+    p_bc.add_argument("--a", required=True, help="baseline backtest --out-dir (comma-separate to combine runs)")
+    p_bc.add_argument("--b", required=True, help="variant backtest --out-dir (comma-separate to combine runs)")
+    p_bc.add_argument("--lineups", default="1,20,150", help="entry counts to compare (default %(default)s)")
+    p_bc.add_argument("--boot", type=int, default=10000, help="bootstrap resamples (default %(default)s)")
+    p_bc.add_argument("--seed", type=int, default=0)
+    p_bc.add_argument("--out", default=None, help="also write the per-slate differences to this CSV")
+    p_bc.set_defaults(func=cmd_backtest_compare)
 
     p_fs = sub.add_parser("field-study", help="Profile past contest-standings exports (field behavior)")
     p_fs.add_argument("standings", nargs="+", help="contest-standings CSV or ZIP files")

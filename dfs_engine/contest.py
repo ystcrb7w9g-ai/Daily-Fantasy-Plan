@@ -580,6 +580,20 @@ def captain_ownership(df: pd.DataFrame) -> np.ndarray | None:
     return c.fillna(0.0).clip(lower=0.0).to_numpy(dtype=float)
 
 
+def scale_ownership(df: pd.DataFrame, scales: dict[str, float], column: str = "own") -> np.ndarray:
+    """`column` with each listed position's ownership times its factor (e.g. {"QB": 0.85}) and every
+    other player rescaled so the column's total stays the same. Meant for Showdown, where no slot is
+    tied to a position, so a position's share of the field can move."""
+    v = pd.to_numeric(df[column], errors="coerce").fillna(0.0).clip(lower=0.0).to_numpy(dtype=float)
+    f = df["position"].map(scales).fillna(1.0).to_numpy(dtype=float)
+    out = v * f
+    moved = f != 1.0
+    rest = out[~moved].sum()
+    if rest > 0:
+        out[~moved] *= max(v.sum() - out[moved].sum(), 0.0) / rest
+    return out
+
+
 def field_shares(field_w: np.ndarray, df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray | None]:
     """(share of field lineups rostering each player, share captaining him -- None for Classic)."""
     if not (field_w == 1.5).any():

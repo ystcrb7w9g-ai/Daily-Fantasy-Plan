@@ -79,16 +79,58 @@ def test_backtest_replays_dk_run_and_grades_against_real_standings():
         g = r["ranking"]
         assert 0.0 <= g["auc_top1"] <= 1.0 and g["real_top1"] > 0 and len(g["by_ownership_quintile"]) == 5
         assert 0.0 < g["predicted_top1_mean"] < 0.2
+        assert -1.0 < g["log_skill"] < 1.0 and g["brier_skill"] <= 1.0 and np.isfinite(g["calibration_slope"])
         p1, p5 = r["replay"]["picks"][1], r["replay"]["picks"][5]
         assert p1["n"] == 1 and p5["n"] == 5 and 1 <= p5["best_finish"] <= 3001 and p5["cashes"] <= 5
         assert p5["fees"] == 50.0 and p5["won"] >= 0
+        assert 0 <= p5["won_capped"] <= p5["won"] + 1e-9 and 0 < p5["median_finish_pct"] <= 1
         f = r["field"]
         assert abs(f["real"]["proj_mean"] - f["ours"]["proj_mean"]) < 15 and "collision_x1e4" in f["ours"]
         assert os.path.exists(os.path.join(tmp, "T1.pkl"))
         tables = bt.summarize([r], (1, 5))
         assert len(tables["picks"]) == 2 and len(tables["ranking"]) == 1
+        assert "log skill" in tables["ranking"] and "won (capped at 11th)" in tables["picks"]
         bt.save([r], os.path.join(tmp, "out"))
         assert os.path.exists(os.path.join(tmp, "out", "backtest.json"))
+
+
+def test_proper_scores_reward_calibrated_forecasts():
+    rng = np.random.default_rng(0)
+    n, sims = 200_000, 100_000
+    z = rng.normal(size=n)
+    logit0 = np.log(0.01 / 0.99)
+    p_true = 1 / (1 + np.exp(-(logit0 + 0.8 * z)))
+    y = rng.random(n) < p_true
+    good = bt.proper_scores(p_true * sims, sims, y)
+    over = bt.proper_scores(sims / (1 + np.exp(-(logit0 + 1.6 * z))), sims, y)  # chances spread twice too far
+    flat = bt.proper_scores(np.full(n, 0.01 * sims), sims, y)
+    assert abs(good["calibration_slope"] - 1) < 0.1 and abs(good["calibration_intercept"]) < 0.25
+    assert abs(over["calibration_slope"] - 0.5) < 0.07
+    assert good["log_skill"] > over["log_skill"] and good["log_skill"] > flat["log_skill"] + 0.02
+    assert abs(flat["log_skill"]) < 0.01 and good["brier_skill"] > flat["brier_skill"]
+
+
+def _fake_result(label, log_skill, cashes, won_capped=1500.0, finish=0.4):
+    return {"label": label,
+            "ranking": {"log_skill": log_skill, "brier_skill": 0.01, "auc_top1": 0.6, "real_top1_in_best_5pct": 0.02},
+            "replay": {"picks": {"150": {"cashes": cashes, "top1": 2, "won_capped": won_capped, "fees": 3000.0,
+                                         "median_finish_pct": finish}}}}
+
+
+def test_compare_reports_slate_differences_and_intervals():
+    a = [_fake_result(f"S{i}", 0.05, 40) for i in range(6)] + [_fake_result("only_in_a", 0.5, 99)]
+    b = [_fake_result(f"S{i}", 0.06, 40 + i % 3) for i in range(6)]
+    t = bt.compare(a, b, n_lineups=(150,), n_boot=2000).set_index("metric")
+    assert int(t["slates"].max()) == 6                       # slates only one run has are left out
+    ls = t.loc["log skill"]
+    assert abs(ls["mean B-A"] - 0.01) < 1e-12 and ls["verdict"] == "B better" and ls["B better in"] == 6
+    c = t.loc["150 entries: cashes"]
+    assert c["B better in"] == 4 and c["B worse in"] == 0 and abs(c["mean B-A"] - 1.0) < 1e-12
+    assert c["90% low"] <= 1.0 <= c["90% high"]
+    f = t.loc["150 entries: median finish %"]
+    assert f["verdict"] == "unclear" and f["B better in"] == 0 and f["B worse in"] == 0
+    worse = bt.compare(a, [_fake_result(f"S{i}", 0.05, 40, finish=0.5) for i in range(6)], n_lineups=(150,), n_boot=500)
+    assert worse.set_index("metric").loc["150 entries: median finish %", "verdict"] == "B worse"  # lower is better
 
 
 def test_fit_sharpen_recovers_how_chalky_a_contest_was():
