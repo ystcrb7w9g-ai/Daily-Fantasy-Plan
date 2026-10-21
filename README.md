@@ -986,6 +986,23 @@ that section):
   - *Classic:* QB + 2 receivers finished top 1% at 1.5x the average vs
     1.0x for QB + 1 (5 of 6 weeks); 150-entry accounts at 1.4x,
     single-entry players at 0.84x.
+- **Our engine vs the experienced regulars** (the 160 accounts in 8+ of
+  the 11 contests with 800+ entries; our 150-lineup backtest picks scored
+  the same way, each contest weighted equally). Millys: our winnings with
+  prizes capped at 11th rank 3rd of 156, top-1% rate 11th, top-0.1% rate
+  7th, cash rate 33rd. Showdowns: top-1% rate 6th of 154, top-0.1% 4th,
+  capped winnings 19th, cash rate 49th. That flatters us: the engine was
+  tuned on these contests, and the Milly figure leans on W2. The
+  regulars' own results barely repeat: split the contests into two
+  halves and the rank correlation between halves is 0.00-0.16 for capped
+  winnings, top-1% and top-0.1% rates, so which regulars look best over 11
+  contests is mostly luck. Habits that went with better capped winnings in
+  both halves: in Millys, higher projection, chalkier lineups, more
+  different QBs across the 150, a TE at FLEX; in Showdowns, full salary,
+  higher projection, chalkier and more-copied lineups, QB captains (and,
+  for top-0.1% finishes, fewer TE captains). Ours match or beat the
+  regulars' median on all of them except Milly ownership (our lineups sit
+  at the 49th ownership percentile, theirs at the 63rd).
 - **Tried, not adopted:**
   - *A ranking learned from past results* (our sim's top-1% chance plus
     projection, ownership and salary; trained on four Millys, tested on
@@ -1071,7 +1088,11 @@ that section):
     ownership, 150-entry sets cashed 3.5 more times a contest (more in 6
     of 10) but finished top 1% no more often, and 20-entry sets finished
     top 1% less (0.5 fewer a contest, fewer in 4, more in none). Not
-    adopted: the tilt buys cashes, not the top finishes that pay.
+    adopted: the tilt buys cashes, not the top finishes that pay. On the
+    Millys alone, to close the ownership gap with the regulars: 150-entry
+    sets 301 vs 280 cashes, the same 23 top-1% finishes, 3 vs 5 top-0.1%
+    finishes, capped winnings +88% vs +41%; 20-entry sets 2 vs 5 top-1%
+    finishes.
   - *Higher exposure caps* (`--max-exposure` 0.6 / 0.8 / 1.0 instead of
     0.4, re-picked from the same saved models), prompted by a 150-max
     account in all ten contests whose most-used player was in 65% of its
