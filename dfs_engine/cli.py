@@ -425,9 +425,9 @@ def _add_model_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--cpt-own-scale", default=None, metavar="POS=F[,POS=F]",
                    help="Showdown: the same for captain ownership (e.g. QB=0.75)")
     p.add_argument("--tail-pricing", action="store_true",
-                   help="price finishes near the top from each sim's field tail (an exponential fit to its "
-                        f"top {100 * cs.TAIL_FRAC:.1f}%% of sample scores), so beating the whole field sample "
-                        "by a lot pays more than barely beating it")
+                   help="experimental: price finishes near the top from each sim's field tail (an exponential "
+                        f"fit to its top {100 * cs.TAIL_FRAC:.1f}%% of sample scores). On real contest models it "
+                        "undercounted wins against an exact full-size field; see the README")
     p.add_argument("--pos-spread", default=None, metavar="POS=K[,POS=K]",
                    help="widen (K>1) or narrow (K<1) these positions' simulated outcomes around each "
                         "player's mean, e.g. WR=1.1; means and correlations stay the same")

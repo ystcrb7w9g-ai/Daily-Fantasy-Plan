@@ -1032,6 +1032,22 @@ that section):
     finished lower; the Showdowns were slightly worse on the forecast
     scores. Not adopted: a sim that matches players' ranges better can
     still pick worse lineups.
+  - *Tail pricing* (`--tail-pricing`). The field is a 20k sample of a
+    160k contest, so a lineup that beats the whole sample is paid an
+    average of the top ranks however far ahead it is. On synthetic fields
+    an exponential tail on each sim's top 0.5% of sample scores cut that
+    error severalfold. On real contest models priced against an exact
+    full-size field, it didn't: total expected winnings 0.67x / 0.62x of
+    exact (W5 Milly / SNF Showdown) vs 0.94x / 0.90x for the flat average,
+    and the chance of a 1st place 0.6% / 2.4% vs 1.6% / 6.6% exact (flat
+    average 1.4% / 5.0%). Real lineup scores thin out faster at the top
+    than the curve assumes. It ranked Milly lineups slightly better (0.975
+    vs 0.949 rank agreement) and Showdown lineups worse (0.851 vs 0.955).
+    A full-size field sample is the accurate option (a second full-size
+    draw matched the first at 1.00-1.01x, rank agreement 0.98), but takes
+    2-3x as long and changes nothing under the default top-1% objective,
+    whose top-1% line the 20k sample already gets right (1.16% vs 1.16%).
+    Off by default.
 
 ### Learning from past contests (`field-study`)
 
