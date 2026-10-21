@@ -1062,6 +1062,14 @@ that section):
     of 10) but finished top 1% no more often, and 20-entry sets finished
     top 1% less (0.5 fewer a contest, fewer in 4, more in none). Not
     adopted: the tilt buys cashes, not the top finishes that pay.
+  - *Higher exposure caps* (`--max-exposure` 0.6 / 0.8 / 1.0 instead of
+    0.4, re-picked from the same saved models), prompted by a 150-max
+    account in all ten contests whose most-used player was in 65% of its
+    Milly lineups (ours 37%). In the Millys the cap rarely binds: the
+    top-1% coverage objective spreads exposure on its own, and the picks
+    were identical in 5 of 6. In the Showdowns, where it binds, looser caps
+    were worse in 3 of 4. 150 entries x 10 contests: 416 cashes and 35
+    top-1% finishes vs 422 and 37 at 0.4. The cap stays at 0.4.
 
 ### Learning from past contests (`field-study`)
 
