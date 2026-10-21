@@ -424,6 +424,10 @@ def _add_model_args(p: argparse.ArgumentParser) -> None:
                         "rescaled to the same total, before the field is built")
     p.add_argument("--cpt-own-scale", default=None, metavar="POS=F[,POS=F]",
                    help="Showdown: the same for captain ownership (e.g. QB=0.75)")
+    p.add_argument("--tail-pricing", action="store_true",
+                   help="price finishes near the top from each sim's field tail (an exponential fit to its "
+                        "top %.1f%% of sample scores), so beating the whole field sample by a lot pays more "
+                        "than barely beating it" % (100 * cs.TAIL_FRAC))
     p.add_argument("--pos-spread", default=None, metavar="POS=K[,POS=K]",
                    help="widen (K>1) or narrow (K<1) these positions' simulated outcomes around each "
                         "player's mean, e.g. WR=1.1; means and correlations stay the same")
@@ -862,8 +866,11 @@ def model_slate(df: pd.DataFrame, args: argparse.Namespace, total: int) -> Slate
               f"{n_banned} use a banned player, {n['invalid']} invalid, {n['duplicate']} already in the pool)")
     cand_w = cs.lineups_to_weights(candidates, len(df))
     print("Ranking candidates against the field...")
-    ranks = cs.rank_against_field(cand_w, field, eval_scores)
-    hold_ranks = cs.rank_against_field(cand_w, field, holdout_scores)
+    tail_m = cs.tail_size(len(field)) if getattr(args, "tail_pricing", False) else 0
+    if tail_m:
+        print(f"  tail pricing: finishes near the top priced from each sim's top {tail_m} field scores")
+    ranks = cs.rank_against_field(cand_w, field, eval_scores, tail_m=tail_m)
+    hold_ranks = cs.rank_against_field(cand_w, field, holdout_scores, tail_m=tail_m)
     return SlateModel(rules, field, candidates, cand_w, ranks, hold_ranks, extra_rows, need_min, min_exp,
                       eval_scores, holdout_scores)
 
@@ -898,8 +905,9 @@ def _contest_fields(df: pd.DataFrame, args: argparse.Namespace, contests: pd.Dat
                   seed=None if args.seed is None else args.seed + 2, **_optimizer_kwargs(args))
         f = (cs.generate_field_mixture(d, args.field_size, own_sd=args.field_own_sd, **kw)
              if getattr(args, "field_own_sd", 0.0) > 0 else cs.generate_field(d, args.field_size, **kw))
-        out[g] = (cs.rank_against_field(m.cand_w, f, m.eval_scores),
-                  cs.rank_against_field(m.cand_w, f, m.holdout_scores))
+        tail_m = cs.tail_size(len(f)) if getattr(args, "tail_pricing", False) else 0
+        out[g] = (cs.rank_against_field(m.cand_w, f, m.eval_scores, tail_m=tail_m),
+                  cs.rank_against_field(m.cand_w, f, m.holdout_scores, tail_m=tail_m))
     return out
 
 

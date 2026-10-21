@@ -319,6 +319,47 @@ def test_showdown_field_matches_captain_team_split_and_never_one_team():
     assert np.abs(split - np.array(target)).max() < 0.03   # whole field, optimizer slice included
 
 
+def test_tail_counts_are_exact_below_the_threshold_and_fall_smoothly_above():
+    field = np.sort(np.random.default_rng(2).exponential(10.0, (1, 1000)), axis=1)
+    u = field[0, -50]
+    cand = np.array([[u - 5.0, u + 1e-9, field[0, -1], field[0, -1] + 30.0]])
+    exact = 1000 - np.searchsorted(field[0], cand[0], side="right")
+    c = cs.tail_counts(cand, field, exact[None, :], 50)[0]
+    assert c[0] == exact[0]                    # below the threshold: the exact count
+    assert abs(c[1] - 49) < 1e-3               # at the threshold: the 49 sample lineups above it
+    assert 0.1 < c[2] < 3.0                    # at the sample's best: about one expected above
+    assert c[3] < c[2] * np.exp(-1.0)          # far past the sample: still falling
+
+
+def test_tail_pricing_tracks_a_full_size_field_better_than_the_window():
+    rng = np.random.default_rng(5)
+    n_sims, n_full, n_sample, n_cand = 100, 40_000, 5_000, 40   # a sample 1/8 the contest, like a Milly
+    full = rng.gamma(9.0, 12.0, (n_sims, n_full))             # every real entry's score, every sim
+    sample = np.sort(full[:, :n_sample], axis=1)              # the field sample the engine would see
+    cand = rng.gamma(9.0, 12.0, (n_sims, n_cand)) + np.linspace(0, 120, n_cand)[None, :]
+    payout = cs.gpp_payout_curve(n_full + 1, 10.0)
+    full_sorted = np.sort(full, axis=1)
+    exact_above = n_full - np.stack([np.searchsorted(full_sorted[t], cand[t], side="right") for t in range(n_sims)])
+    exact = payout.average_payout(exact_above.astype(float), np.ones(exact_above.shape)).mean(axis=0)
+    s_above = (n_sample - np.stack([np.searchsorted(sample[t], cand[t], side="right")
+                                    for t in range(n_sims)])).astype(np.int32)
+    common = dict(n_above=s_above, n_equal=np.zeros_like(s_above), n_field=n_sample,
+                  cand_mean_pts=cand.mean(axis=0), field_dupe_counts=np.zeros(n_cand))
+    window = cs.score_contest(cs.FieldRanks(**common), payout).metrics["exp_payout"].to_numpy()
+    smooth = cs.tail_counts(cand, sample, s_above, cs.tail_size(n_sample))
+    tail_res = cs.score_contest(cs.FieldRanks(**common, n_above_smooth=smooth), payout)
+    tail = tail_res.metrics["exp_payout"].to_numpy()
+    top = exact > np.median(exact)                            # the lineups that reach the top
+    assert np.abs(tail - exact)[top].mean() < 0.8 * np.abs(window - exact)[top].mean()
+    best = exact >= np.sort(exact)[-10]                       # the ten best: where 1st-place money is
+    window_bias, tail_bias = np.mean((window - exact)[best]), np.mean((tail - exact)[best])
+    assert window_bias < -0.2 * exact[best].mean()            # the flat average underpays them
+    assert abs(tail_bias) < 0.5 * abs(window_bias)
+    exact_win = (exact_above == 0).mean(axis=0)[best].sum()      # chance one of the ten wins outright
+    tail_win = tail_res.metrics["win_pct"].to_numpy()[best].sum()
+    assert (tail_res.metrics["win_pct"] >= 0).all() and 0.5 * exact_win < tail_win < 2 * exact_win
+
+
 def test_stretch_spread_widens_a_position_and_keeps_means_and_ranks():
     from dfs_engine.simulate import stretch_spread
     rng = np.random.default_rng(1)

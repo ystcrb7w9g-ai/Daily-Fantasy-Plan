@@ -1128,12 +1128,76 @@ class FieldRanks:
     cand_mean_pts: np.ndarray
     field_dupe_counts: np.ndarray  # exact copies of each candidate in the field sample
     best: np.ndarray | None = None  # (n_sims, k) int32: the k highest-scoring candidates per sim
+    n_above_smooth: np.ndarray | None = None  # (n_sims, n_candidates) float32: tail-smoothed n_above
+
+
+# Tail pricing (`rank_against_field(tail_m=tail_size(n_field))`): the field is a sample (20k lineups
+# standing in for a 160k contest), so a lineup that beats the whole sample is otherwise paid a flat
+# average of the top ranks however far ahead it is. Each sim's top TAIL_FRAC of sample scores get an
+# exponential tail instead, and placements with fewer than TAIL_LAMBDA_MAX real entries expected
+# above are priced from it. Against an exact full-size field (40k entries sampled 5k, like a Milly),
+# the flat average paid the top half of lineups about half their worth; a 0.5% tail cut that error
+# 4-7x (wider tails over-count the field above, narrower ones get noisy; a fitted Pareto shape
+# was no better).
+TAIL_FRAC = 0.005
+TAIL_LAMBDA_MAX = 2000.0
+
+
+def tail_size(n_field: int) -> int:
+    """How many of each sim's top field-sample scores the tail is fit to."""
+    return max(25, int(round(TAIL_FRAC * n_field)))
+
+
+def tail_counts(cand_scores: np.ndarray, field_sorted: np.ndarray, n_above: np.ndarray, m: int) -> np.ndarray:
+    """Field-sample lineups expected above each candidate's score, per sim (rows). Above the m-th best
+    field score u the m - 1 lineups over u are treated as exponential excesses (scale: their mean
+    excess), so the count keeps falling smoothly past the sample's best score; at or below u it is
+    the exact count `n_above`. `field_sorted` is ascending along each row."""
+    n_field = field_sorted.shape[1]
+    top = field_sorted[:, n_field - m:]
+    u = top[:, :1]
+    beta = np.maximum((top[:, 1:] - u).mean(axis=1, keepdims=True), 1e-3)
+    tail = (m - 1) * np.exp(-np.maximum(cand_scores - u, 0.0) / beta)
+    return np.where(cand_scores > u, tail, n_above).astype(np.float32)
+
+
+def _tail_table(payout: "PayoutCurve"):
+    """Expected prize on a grid of (real entries expected above, copies sharing the places): the
+    number above is Poisson, and a lineup with copies splits the places it occupies with them."""
+    cached = getattr(payout, "_tail_grid", None)
+    if cached is not None:
+        return cached
+    from scipy.interpolate import RegularGridInterpolator
+    from scipy.stats import poisson
+    lam_grid = np.geomspace(1e-4, TAIL_LAMBDA_MAX * 1.1, 160)
+    l_grid = np.geomspace(1.0, max(2.0, payout.contest_size / 4.0), 40)
+    x = np.arange(len(payout._cum), dtype=float)
+    size = payout.contest_size
+    G = np.zeros((len(lam_grid), len(l_grid)))
+    for a, lam in enumerate(lam_grid):
+        j = np.arange(0, int(lam + 10 * np.sqrt(lam) + 25), dtype=float)
+        p = poisson.pmf(j, lam)
+        hi = np.interp(np.clip(j[:, None] + l_grid[None, :], 0, size), x, payout._cum)
+        lo = np.interp(np.clip(j, 0, size), x, payout._cum)[:, None]
+        G[a] = p @ ((hi - lo) / l_grid[None, :])
+    interp = RegularGridInterpolator((np.log(lam_grid), np.log(l_grid)), G, bounds_error=False, fill_value=None)
+    payout._tail_grid = (lam_grid, l_grid, interp)
+    return payout._tail_grid
+
+
+def tail_expected_payout(payout: "PayoutCurve", lam: np.ndarray, copies: np.ndarray) -> np.ndarray:
+    """Expected prize when the real entries above you are Poisson(`lam`) and `copies` (you included)
+    share your places."""
+    lam_grid, l_grid, interp = _tail_table(payout)
+    pts = np.column_stack([np.log(np.clip(lam, lam_grid[0], lam_grid[-1])),
+                           np.log(np.clip(copies, l_grid[0], l_grid[-1]))])
+    return interp(pts)
 
 
 def rank_against_field(
     cand_w: np.ndarray, field_w: np.ndarray, scores: np.ndarray, batch: int = 256,
     cand_offset: np.ndarray | None = None, field_offset: np.ndarray | None = None,
-    best_k: int = 1,
+    best_k: int = 1, tail_m: int = 0,
 ) -> FieldRanks:
     """
     `cand_offset` / `field_offset` add fixed points per lineup (e.g. late
@@ -1141,6 +1205,8 @@ def rank_against_field(
     `best_k`: also record each sim's `best_k` highest-scoring candidates
     (field-free ceiling: how often a lineup is the best one, like
     SaberSim's "Sim Optimals").
+    `tail_m`: also keep tail-smoothed counts (see `tail_counts`) for tail
+    pricing; 0 = off.
     """
     n_sims = len(scores)
     n_cand, n_field = len(cand_w), len(field_w)
@@ -1148,6 +1214,7 @@ def rank_against_field(
     n_equal = np.zeros((n_sims, n_cand), dtype=np.int32)
     best_k = int(min(max(best_k, 1), n_cand))
     best = np.zeros((n_sims, best_k), dtype=np.int32)
+    smooth = np.zeros((n_sims, n_cand), dtype=np.float32) if tail_m and n_field > tail_m else None
     cand_pts = np.zeros(n_cand)
     for s0 in range(0, n_sims, batch):
         sc = scores[s0:s0 + batch].astype(np.float32)
@@ -1170,13 +1237,15 @@ def rank_against_field(
         hi = np.searchsorted(flat, q, side="right").reshape(b, n_cand) - row_base
         n_above[s0:s0 + b] = n_field - hi
         n_equal[s0:s0 + b] = hi - lo
+        if smooth is not None:
+            smooth[s0:s0 + b] = tail_counts(cs, fs, n_field - hi, tail_m)
         cand_pts += cs.sum(axis=0)
         best[s0:s0 + b] = (np.argmax(cs, axis=1)[:, None] if best_k == 1
                            else np.argpartition(-cs, best_k - 1, axis=1)[:, :best_k])
 
     field_keys = Counter(map(bytes, (field_w * 2).astype(np.uint8)))
     dupes = np.array([field_keys.get(bytes(r), 0) for r in (cand_w * 2).astype(np.uint8)])
-    return FieldRanks(n_above, n_equal, n_field, cand_pts / n_sims, dupes, best)
+    return FieldRanks(n_above, n_equal, n_field, cand_pts / n_sims, dupes, best, smooth)
 
 
 def score_contest(ranks: FieldRanks, payout: PayoutCurve, top_frac: float = 0.01) -> ContestResult:
@@ -1194,6 +1263,14 @@ def score_contest(ranks: FieldRanks, payout: PayoutCurve, top_frac: float = 0.01
     start = ranks.n_above * scale
     length = max(scale, 1.0) + ranks.n_equal * scale
     pay = payout.average_payout(start, length).astype(np.float32)
+    win = (ranks.n_above == 0) / length
+    if ranks.n_above_smooth is not None:  # tail pricing near the top (see TAIL_M)
+        lam = ranks.n_above_smooth.astype(np.float64) * scale
+        near_top = lam < TAIL_LAMBDA_MAX
+        if near_top.any():
+            copies = 1.0 + ranks.n_equal * scale
+            pay[near_top] = tail_expected_payout(payout, lam[near_top], copies[near_top]).astype(np.float32)
+            win = np.where(near_top, np.exp(-lam) / copies, 0.0)
     mid = start + 0.5 * length
     top1 = mid < top1_rank
 
@@ -1205,7 +1282,7 @@ def score_contest(ranks: FieldRanks, payout: PayoutCurve, top_frac: float = 0.01
         "roi": mean_pay / fee - 1.0 if fee > 0 else np.full(len(mean_pay), np.nan),
         "top1_pct": top1.mean(axis=0),
         "cash_pct": (mid < payout.paid_places).mean(axis=0),
-        "win_pct": ((ranks.n_above == 0) / length).mean(axis=0),
+        "win_pct": win.mean(axis=0),
         "exp_dupes": ranks.field_dupe_counts * scale,
     })
     if ranks.best is not None:  # share of sims in which it is (one of) the best candidate(s)
