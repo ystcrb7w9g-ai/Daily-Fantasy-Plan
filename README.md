@@ -1048,6 +1048,20 @@ that section):
     2-3x as long and changes nothing under the default top-1% objective,
     whose top-1% line the 20k sample already gets right (1.16% vs 1.16%).
     Off by default.
+  - *Recalibrating the sim's top-1% chances.* Fit on the other nine
+    contests' real entries (360k) and tested on the held-out one, with each
+    lineup's simulated top-1% hits scaled to its calibrated chance before
+    picking. On the sim's chance alone, the fitted slope was 0.72-1.09:
+    the sim is slightly over-confident. With lineup ownership added, its
+    coefficient was positive in all ten fits: more-owned lineups finish top
+    1% more often than the sim says (x1.12-1.28 the odds per standard
+    deviation of ownership), the clearest sign yet that the sim over-rates
+    contrarian lineups. Neither version forecast the held-out contests
+    better (log skill -0.004 / -0.006; better in 5 / 4 of 10). With
+    ownership, 150-entry sets cashed 3.5 more times a contest (more in 6
+    of 10) but finished top 1% no more often, and 20-entry sets finished
+    top 1% less (0.5 fewer a contest, fewer in 4, more in none). Not
+    adopted: the tilt buys cashes, not the top finishes that pay.
 
 ### Learning from past contests (`field-study`)
 
