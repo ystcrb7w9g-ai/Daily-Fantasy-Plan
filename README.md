@@ -962,6 +962,16 @@ that section):
   expected). The entry actually played (built by hand, rated 0.66% by
   our sim) finished 3,273rd and cashed. 150 entries: 28 cashes, 2
   top-1%, est. -33%; SaberSim's 5,000 lineups: 14% cashed, 0.2% top-1%.
+- **Week 7 MNF Showdown** (87k entries): ranking AUC 0.593 (projection
+  alone 0.517), and our field matched the real one closely (duplication
+  7.0 vs 6.7 x1e-4, mean salary $49.2k both). The single-entry pick (CPT
+  McCaffrey, full salary) scored 95.5 (39,817th; 223 real copies vs ~141
+  expected); the under-$48,500 pick also sent scored 111.2 (4,392nd,
+  cashed); the entry played (built by hand) finished 47,275th. The winner
+  (CPT Daniels, 26 copies) was among our candidates, rated 684th of 2,297.
+  150 entries: 35 cashes, 2 top-1%, best finish 360th, est. -51%;
+  SaberSim's 348 lineups: 13% cashed, 4 top-1%, est. -70%. Max-entry
+  accounts finished top 1% at 0.85% vs 1.02% for casual players.
 - **What real winners looked like** (every entry of the ten contests we
   could map, with the projections and ownership we had at lock; W1-W4
   map only 65-81% of entries, the rest 97-99%):
