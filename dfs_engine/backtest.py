@@ -307,22 +307,39 @@ PRIOR_SIMS = 100
 P_FLOOR = 1e-4
 
 
-def _calibration_fit(p: np.ndarray, y: np.ndarray, iters: int = 50) -> tuple[float, float]:
+def logistic_fit(X: np.ndarray, y: np.ndarray, iters: int = 100) -> np.ndarray:
+    """Logistic regression by Newton's method from the base rate (first column = intercept), halving
+    any step that lowers the likelihood, so a forecast far off calibration can't send it diverging."""
+    yf = np.asarray(y, dtype=float)
+    w = np.zeros(X.shape[1])
+    w[0] = np.log(max(yf.mean(), 1e-6) / max(1 - yf.mean(), 1e-6))
+
+    def loglik(v):
+        z = np.clip(X @ v, -30, 30)
+        return float(yf @ z - np.logaddexp(0.0, z).sum())
+    ll = loglik(w)
+    for _ in range(iters):
+        mu = 1.0 / (1.0 + np.exp(-np.clip(X @ w, -30, 30)))
+        H = (X * (mu * (1 - mu))[:, None]).T @ X + 1e-9 * np.eye(X.shape[1])
+        step = np.linalg.solve(H, X.T @ (yf - mu))
+        for _ in range(30):
+            ll_new = loglik(w + step)
+            if ll_new >= ll - 1e-12:
+                break
+            step = step / 2
+        w, ll = w + step, ll_new
+        if np.abs(step).max() < 1e-9:
+            break
+    return w
+
+
+def _calibration_fit(p: np.ndarray, y: np.ndarray) -> tuple[float, float]:
     """Logistic regression of the real outcome on logit(predicted chance): (intercept, slope).
     Calibrated forecasts give (0, 1); a slope below 1 means we spread our chances too far apart."""
     if y.sum() == 0 or y.sum() == len(y):
         return float("nan"), float("nan")
     x = np.log(p / (1 - p))
-    X = np.column_stack([np.ones_like(x), x])
-    w = np.array([0.0, 1.0])
-    yf = y.astype(float)
-    for _ in range(iters):
-        mu = 1.0 / (1.0 + np.exp(-np.clip(X @ w, -30, 30)))
-        H = (X * (mu * (1 - mu))[:, None]).T @ X + 1e-9 * np.eye(2)
-        step = np.linalg.solve(H, X.T @ (yf - mu))
-        w = w + step
-        if np.abs(step).max() < 1e-9:
-            break
+    w = logistic_fit(np.column_stack([np.ones_like(x), x]), y)
     return float(w[0]), float(w[1])
 
 
