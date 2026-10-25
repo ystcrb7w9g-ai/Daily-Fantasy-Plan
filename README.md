@@ -972,6 +972,27 @@ that section):
   150 entries: 35 cashes, 2 top-1%, best finish 360th, est. -51%;
   SaberSim's 348 lineups: 13% cashed, 4 top-1%, est. -70%. Max-entry
   accounts finished top 1% at 0.85% vs 1.02% for casual players.
+- **Week 8 TNF Showdown** (73.5k entries; a $1.25M pool assumed from the
+  field size): ranking AUC 0.630 (projection alone 0.702), and none of
+  the 5% we rated best finished top 1%. Both lineups sent scored about
+  100: the engine's pick (CPT Swift, five Bears) 49,844th with 83 real
+  copies vs ~13 expected, the Patriots-win build 48,273rd with 40 vs ~4.
+  The entry played (built by hand) finished 73,090th. The winner (CPT
+  Burden with both QBs, 46 copies) was among our candidates, rated 94th
+  of 2,000. 150 entries: 50 cashes, 4 top-1%, best finish 47th, est.
+  -13%. Max-entry accounts finished top 1% at 1.33% vs 0.73% for casual
+  players.
+- **We undercount copies of the lineups we like** (W6 TNF, W7 MNF, W8
+  TNF; our ~2,000 candidates matched to real entries). Total copies were
+  right (0.92-1.05x expected), but our 10 best-rated lineups drew
+  2.0-6.1x the copies we expected, ranks 11-50 1.5-2.4x, and ranks past
+  1,000 0.6-0.7x. By projection, lineups within 2 points of the best drew
+  0.2-0.7x the expected copies and those 10+ points back about 1.5x:
+  real fields spread their copies more evenly than ours. The engine
+  favors lineups it thinks are rare, so it picks the ones it undercounts
+  most, and its top-1% odds for them are too high. SaberSim's own
+  lineups aren't the cause: none of our top 50 were in its pool. Not
+  corrected yet; it is the next thing to test.
 - **What real winners looked like** (every entry of the ten contests we
   could map, with the projections and ownership we had at lock; W1-W4
   map only 65-81% of entries, the rest 97-99%):
