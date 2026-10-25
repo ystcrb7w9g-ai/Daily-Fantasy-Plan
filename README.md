@@ -992,7 +992,25 @@ that section):
   favors lineups it thinks are rare, so it picks the ones it undercounts
   most, and its top-1% odds for them are too high. SaberSim's own
   lineups aren't the cause: none of our top 50 were in its pool. Not
-  corrected yet; it is the next thing to test.
+  corrected yet; it is the next thing to test. (Copies don't change the
+  chance of a top-1% finish, since copies tie; they cut what a top
+  finish pays, and the top-1% pick rule barely sees them.)
+- **The sim overrates one-sided Showdown builds** (six Showdowns, ~17,000
+  of our backtest candidates, the sim's top-1% chance vs real finishes).
+  5-1 team splits finished top 1% at 0.32x the sim's rate (short in all
+  six), lineups with a DST at 0.60x, lineups with no QB at 0.18x; 3-3
+  splits beat it (1.30x), as did lineups with both QBs (1.22x). Real
+  fields agree: lineups with a DST finished top 1% at 0.38x the field
+  average (below it in all six), 5-1 builds at 0.63x. Both TNF lineups we
+  sent were 5-1 with a DST. A correction by split, DST and QB count,
+  fitted on the other five contests and applied to each in turn (top
+  lineups by corrected chance, no exposure caps): 150 lineups 281 cashes
+  vs 230, 27 top-1% vs 18, ROI with prizes capped at 11th -13% vs -27%;
+  20 lineups 44 cashes vs 26, capped -11% vs -27%. On TNF8 alone its
+  pick scored 134.0 (1,515th) and the winning lineup was its 3rd choice.
+  It lost badly in the Week 6 TNF, the one game where 5-1 builds won (16
+  cashes vs 50). Not adopted yet: next is the full backtest with the
+  engine's exposure caps.
 - **What real winners looked like** (every entry of the ten contests we
   could map, with the projections and ownership we had at lock; W1-W4
   map only 65-81% of entries, the rest 97-99%):
