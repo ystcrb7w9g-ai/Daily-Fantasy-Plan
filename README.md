@@ -1009,8 +1009,19 @@ that section):
   20 lineups 44 cashes vs 26, capped -11% vs -27%. On TNF8 alone its
   pick scored 134.0 (1,515th) and the winning lineup was its 3rd choice.
   It lost badly in the Week 6 TNF, the one game where 5-1 builds won (16
-  cashes vs 50). Not adopted yet: next is the full backtest with the
-  engine's exposure caps.
+  cashes vs 50). The full test, through the engine's own picks and
+  exposure caps (each candidate's simulated top-1% hits scaled by its
+  leave-one-out factor), shrinks the gain. At half strength (the square
+  root of the factor): 150 lineups 248 cashes vs 227 (better in 5 of 6
+  contests, the only clear result), 23 top-1% vs 20, capped ROI -14% vs
+  -19%; 20 lineups 40 cashes vs 33, capped ROI unchanged; the single
+  pick no clearer (3 cashes vs 2, but worse in 5 of 6). It ranked the
+  real entries slightly better (log skill and AUC up in 4-5 of 6). Full
+  strength was mixed, with much worse rankings on the Week 6 TNF. The
+  quick test overstated it: without caps its top lineups piled into one
+  game script, which paid off on TNF8. Not adopted; re-test as Showdowns
+  come in, and look for the cause in the game sim, which makes one
+  team's blowout (with its DST) too likely.
 - **What real winners looked like** (every entry of the ten contests we
   could map, with the projections and ownership we had at lock; W1-W4
   map only 65-81% of entries, the rest 97-99%):
