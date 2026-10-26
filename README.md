@@ -1079,7 +1079,14 @@ that section):
     329, capped ROI lower in 6 of 7). None adopted; the knobs stay for
     testing on new contests. Real QB~RB1 co-booms are hard to reach: in the
     stat engine even fully separate rushing efficiency only takes them from
-    1.84x to 1.77x (real 0.74x).
+    1.84x to 1.77x (real 0.74x). Showdown refits on the same real-game
+    targets, backtested on all 6 Showdowns: re-tuning the old knobs (loss
+    3.69 -> 3.01) ranked worse (log skill worse in 5 of 6, Brier 6 of 6) and
+    took 150-entry top-1% from 20 to 14. With `rush_eff_corr` 0.01,
+    `share_tilt` 0.06, `td_mix_sd` 0.10 (loss 3.04; QB~RB1 co-booms 1.88x ->
+    1.65x): AUC +0.013 (4 of 6, unclear), more real winners in its best-rated
+    1% (6.6% vs 5.9%), but top-1% 15 vs 20; capped ROI +18% vs -19%, almost
+    all from MNF7. Not adopted.
 - **The regulars share the Showdown blind spot** (six Showdowns; accounts
   with 100+ entries vs single-entry players, each build's top-1% rate
   relative to its own group's average). Regulars play more 5-1 builds
