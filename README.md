@@ -1008,6 +1008,19 @@ that section):
   vs 32). Next: measure real within-game joint scoring on nflverse
   history and fix the game model there, so the six Showdowns stay a
   clean test.
+- **Game-script refit of the Showdown stat sim** (nflverse 2021-25: real
+  DST and K scores rebuilt from team defensive stats and kicking by
+  distance). The pairwise links were close, but with the same marginals
+  the sim gives every stacked Showdown build 13-31% more 99th-percentile
+  upside than real games' joint ranks (538 complete games; 90% bootstrap
+  ranges all above 1), DST and one-sided builds the most. A knob search
+  with the old targets plus K / DST rank correlations and these build
+  ceilings cut the excess from 1.20x to 1.14x, at the cost of a weaker
+  opposing-QB link (0.12 vs 0.16-0.20 real). Six Showdowns, seed 7: ranking
+  AUC +0.006 (better in 4 of 6, the one clear result), 150 lineups 237 vs
+  227 cashes, 20 vs 20 top-1%, capped ROI the same. Not adopted; the sim's
+  shared game shock ties moderate correlation to extreme co-booms, which
+  real football doesn't, so the fix is likely structural.
 - **Which contest types our edge holds up in** (all 13 contests; for each
   virtual contest the engine re-picks 20 lineups with its own objective and
   caps, and each lineup's real score is priced exactly against opponents
