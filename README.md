@@ -995,6 +995,27 @@ that section):
   lineups scored on the Milly: 62 vs 52 above the cash line, but 7 vs 9
   top-1%, 0 vs 2 top-0.1%, best 180.2 vs 197.4. More cashes, a weaker top
   end: one week, so not a verdict.
+- **Week 8 SNF Showdown** (KC @ SEA, $15, 78,431 entries): we entered the
+  balanced alternative (CPT Kelce; 3-3, both QBs, no DST) on my call over
+  the engine's pick, citing its expected copies and the 5-1/DST blind spot:
+  68.78 points, 49,485th, $0. The engine's pick (CPT Smith-Njigba, Darnold,
+  Worthy, Wilson, Myers, Seahawks DST: a Seattle 5-1 with its DST) scored
+  110.03, 311th (top 0.4%), about $30 per entry: 247 real copies (we
+  expected 255). Our 10th-rated lineup won outright (114.93, tied 149 ways,
+  about $3,240 each). Seattle 5-1 builds with the DST were 4.5% of entries
+  and 19% of them finished top 1%; the Chiefs busted (Walker, 26.5%
+  captained, 9.7; Mahomes 7.0; Worthy 4.1). Backtest (seed 7, usual flags):
+  1 entry 110.0 (311th); 20 entries about $3,361 on $300 (the winner among
+  them); 150 entries $4,531 on $2,250, 44 cashes; ranking AUC 0.866, and 43%
+  of the real lineups it rated in its top 1% finished top 1%. The Showdown
+  build correction, fit on the other six Showdowns, would have picked the
+  lineup we entered and cut 150-entry cashes 44 -> 31, top-1% 3 -> 1. With
+  seven Showdowns the sim's overrating of DST lineups shrinks to x0.72
+  (6 of 7 contests, t -1.1) and 5-1 builds to x0.94 (no consistent miss);
+  RB captains still trail (x0.59, 6 of 7). Lesson: the engine's single
+  pick stands unless a correction has passed the backtest. The refit
+  Showdown sim on SNF8: same single pick, AUC 0.876 vs 0.866, 150 entries
+  39 vs 44 cashes, 3 vs 3 top-1%.
 - **Reverse-engineering the regulars** (13 contests, 2,286,625 entries from
   222,286 accounts, every entry mapped to its lineup; 596 regulars with
   20+ entries in 5+ contests of a format: 484 Classic, 246 Showdown; our
@@ -1047,7 +1068,8 @@ that section):
     real/sim ratio runs 0.74 -> 1.75; at equal sim projection those lineups
     scored +3.1 points per sd (6 of 7, t 3.4). QB with his own RB x0.74
     (7 of 7). Showdown: DST x0.53 (6 of 6), 5-1 x0.67, no QB x0.72, each
-    $1k left x0.84.
+    $1k left x0.84 (six Showdowns; with Week 8 SNF: DST x0.72, 6 of 7;
+    5-1 x0.94; RB captain x0.59, 6 of 7).
   - *Joint booms vs real games* (nflverse 2021-25, 1,076 team-games, both
     players in their top 10%, x independent): QB with own RB1 real 0.74,
     Classic sim 1.48, Showdown sim 2.00; RB1 with WR1 0.56 / 1.08 / 1.12;
