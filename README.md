@@ -995,6 +995,22 @@ that section):
   lineups scored on the Milly: 62 vs 52 above the cash line, but 7 vs 9
   top-1%, 0 vs 2 top-0.1%, best 180.2 vs 197.4. More cashes, a weaker top
   end: one week, so not a verdict.
+- **Which contest types our edge holds up in** (all 13 contests; for each
+  virtual contest the engine re-picks 20 lineups with its own objective and
+  caps, and each lineup's real score is priced exactly against opponents
+  drawn from that contest's real entries; stylized DK payouts, 15% rake,
+  11% for the double-up). Median ROI per entry, contests in profit: as
+  played (Milly / $1M+ Showdowns) -29%, 3/13; 10,000-entry GPP -9%, 6/13;
+  1,000-entry +13%, 7/13; 100-entry +19%, 7/13; 1,000-entry against
+  single-entry players only +52%, 7/13; against 100+-entry accounts only
+  -10%, 4/13; 100-entry double-up +17%, 10/13 (all 6 Showdowns). The
+  three contests never tuned on show the same order (100-entry and
+  casual fields +21%, double-up +19%, the big contests -11% to -35%). The
+  edge is over casual players; against the max-entry regulars it is about
+  gone, and the contests we have been playing are full of them (17% of the
+  Milly's entries, 74% of the Pocket Cup's). The double-up figure is
+  flattering: real cash-game fields build for a floor and are sharper
+  than the tournament entries used as opponents here.
 - **We undercount copies of the lineups we like** (W6 TNF, W7 MNF, W8
   TNF; our ~2,000 candidates matched to real entries). Total copies were
   right (0.92-1.05x expected), but our 10 best-rated lineups drew
