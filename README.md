@@ -995,6 +995,19 @@ that section):
   lineups scored on the Milly: 62 vs 52 above the cash line, but 7 vs 9
   top-1%, 0 vs 2 top-0.1%, best 180.2 vs 197.4. More cashes, a weaker top
   end: one week, so not a verdict.
+- **The regulars share the Showdown blind spot** (six Showdowns; accounts
+  with 100+ entries vs single-entry players, each build's top-1% rate
+  relative to its own group's average). Regulars play more 5-1 builds
+  (21% of their lineups vs 13%) and more DSTs (28% vs 19%), and their 5-1
+  lineups finish top 1% at 0.44x their average (below 1x in all six), DST
+  lineups at 0.46x (5 of 6), RB captains at 0.65x; both-QB lineups at
+  1.26x. SaberSim's own lineup exports lean the same way: 14-21% are 5-1
+  and 19-42% carry a DST. The common sim tools seem to make one team's
+  blowout (with its DST) too likely and shootouts too rare. Regulars'
+  lineups are far less duplicated than casual players' (median 9 copies
+  vs 32). Next: measure real within-game joint scoring on nflverse
+  history and fix the game model there, so the six Showdowns stay a
+  clean test.
 - **Which contest types our edge holds up in** (all 13 contests; for each
   virtual contest the engine re-picks 20 lineups with its own objective and
   caps, and each lineup's real score is priced exactly against opponents
