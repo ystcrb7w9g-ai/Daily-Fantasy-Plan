@@ -982,6 +982,19 @@ that section):
   of 2,000. 150 entries: 50 cashes, 4 top-1%, best finish 47th, est.
   -13%. Max-entry accounts finished top 1% at 1.33% vs 0.73% for casual
   players.
+- **Week 8 Milly** (147k entries; $2.5M): a contrarian week. The winner
+  (225.4) and the next four all had the Bucs DST (27.0 at 4.6% owned) and
+  Tony Pollard (39.5 at 4.4%); the chalk busted (Golden 9.9 at 39%).
+  Max-entry accounts finished top 1% at 3.9x the casual rate (4.6x in the
+  Pocket Cup qualifier). Ranking AUC 0.536, and 0.7% of the 5% we rated
+  best finished top 1%. 150 entries: 49 cashes, 6 top-1%, est. -35%. The
+  entry played (the best-rated lineup of a 12,421-lineup pool) scored
+  94.3 (123,621st); the hand-picked chalky lineup with two contrarian
+  Jets scored 135.7 (would have cashed). Bigger candidate pool (10,000
+  extra lineups, rated in the same sims) vs the usual 2,422, both 191
+  lineups scored on the Milly: 62 vs 52 above the cash line, but 7 vs 9
+  top-1%, 0 vs 2 top-0.1%, best 180.2 vs 197.4. More cashes, a weaker top
+  end: one week, so not a verdict.
 - **We undercount copies of the lineups we like** (W6 TNF, W7 MNF, W8
   TNF; our ~2,000 candidates matched to real entries). Total copies were
   right (0.92-1.05x expected), but our 10 best-rated lineups drew
