@@ -174,6 +174,28 @@ def test_qb_noise_mult_ties_opposing_qbs_together():
     assert np.allclose(tight.mean(axis=0) / df["proj"].to_numpy(), 1.0, atol=0.06)
 
 
+def test_run_pass_and_dst_knobs_default_off_and_shape_real_patterns():
+    from dfs_engine.simulate import TD_MODEL
+    df = _multi_game_pool()
+    a = df[df["team"] == "AAA"]
+    qb = a[a["position"] == "QB"]["proj"].idxmax()
+    rb = a[a["position"] == "RB"]["proj"].idxmax()
+    opp_dst = df[(df["team"] == a["opp"].iloc[0]) & (df["position"] == "DST")].index[0]
+    base = simulate_player_scores(df, n_trials=20000, seed=33, **TD_MODEL)
+    same = simulate_player_scores(df, n_trials=20000, seed=33, **dict(TD_MODEL, run_pass_sd=0.0, run_pass_yards=0.0,
+                                                                       run_pass_script=0.0, dst_td_cost=0.0))
+    assert np.array_equal(base, same)  # all off = the old sim, draw for draw
+
+    def co_boom(sc, i, j, q=0.9):
+        return ((sc[:, i] >= np.quantile(sc[:, i], q)) & (sc[:, j] >= np.quantile(sc[:, j], q))).mean() / (1 - q) ** 2
+    tilt = simulate_player_scores(df, n_trials=20000, seed=33, **dict(TD_MODEL, run_pass_sd=0.8, run_pass_yards=0.15))
+    assert co_boom(tilt, qb, rb) < co_boom(base, qb, rb) - 0.2      # big RB games come with smaller passing games
+    dst = simulate_player_scores(df, n_trials=20000, seed=33, **dict(TD_MODEL, dst_td_cost=2.0))
+    assert np.corrcoef(dst[:, qb], dst[:, opp_dst])[0, 1] < np.corrcoef(base[:, qb], base[:, opp_dst])[0, 1] - 0.1
+    for sc in (tilt, dst):
+        assert np.allclose(sc.mean(axis=0) / df["proj"].to_numpy(), 1.0, atol=0.06)
+
+
 # --- outcomes report -------------------------------------------------------
 
 def test_player_outcomes_columns_and_ranges():

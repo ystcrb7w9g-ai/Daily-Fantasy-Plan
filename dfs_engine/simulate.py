@@ -121,18 +121,22 @@ RUSH_TD_WEIGHT = {"RB": 1.0, "QB": 0.34}
 
 
 def touchdown_points(df: pd.DataFrame, team_points: np.ndarray, player_team_idx: np.ndarray,
-                     team_names: list, rng: np.random.Generator) -> np.ndarray:
+                     team_names: list, rng: np.random.Generator, pass_mult: np.ndarray | None = None,
+                     rush_mult: np.ndarray | None = None, return_counts: bool = False):
     """
     Per-trial TD points from a team-level TD layer, centered on each player's
     mean (so it reshapes, not shifts). Each team's passing and rushing TD
     counts are Poisson with rates scaled by its simulated points; passing TDs
     go to its top-projected QB (4 each) and to receivers by weight (6 each),
-    rushing TDs to its RBs / QB (6 each).
+    rushing TDs to its RBs / QB (6 each). `pass_mult` / `rush_mult`
+    ((n_trials, n_teams)) tilt each team-game toward passing or running.
+    `return_counts`: also return each team's TD count per trial.
     """
     n_trials, n_players = team_points.shape[0], len(df)
     pos = df["position"].to_numpy()
     proj = df["proj"].to_numpy(dtype=float).clip(min=0.0)
     out = np.zeros((n_trials, n_players))
+    team_tds = np.zeros((n_trials, len(team_names)))
     scale = np.clip(team_points / AVG_TEAM_TOTAL, 0.02, None)
     for t in range(len(team_names)):
         on = np.flatnonzero(player_team_idx == t)
@@ -140,18 +144,22 @@ def touchdown_points(df: pd.DataFrame, team_points: np.ndarray, player_team_idx:
             continue
         qbs = on[pos[on] == "QB"]
         qb = qbs[np.argmax(proj[qbs])] if len(qbs) else None
-        for rate, weights, qb_pts in ((PASS_TDS_PER_TEAM, REC_TD_WEIGHT, 4.0), (RUSH_TDS_PER_TEAM, RUSH_TD_WEIGHT, 0.0)):
+        for rate, weights, qb_pts, mult in ((PASS_TDS_PER_TEAM, REC_TD_WEIGHT, 4.0, pass_mult),
+                                            (RUSH_TDS_PER_TEAM, RUSH_TD_WEIGHT, 0.0, rush_mult)):
             w = np.array([weights.get(p, 0.0) for p in pos[on]]) * proj[on]
             if weights is RUSH_TD_WEIGHT and qb is not None:
                 w = np.where(on == qb, w, np.where(pos[on] == "QB", 0.0, w))  # backup QBs don't run it in
             if w.sum() <= 0:
                 continue
-            n_tds = rng.poisson(rate * scale[:, t])
+            lam = rate * scale[:, t] if mult is None else rate * scale[:, t] * mult[:, t]
+            n_tds = rng.poisson(lam)
             counts = rng.multinomial(n_tds, w / w.sum())
             out[:, on] += 6.0 * counts
+            team_tds[:, t] += n_tds
             if qb_pts and qb is not None:
                 out[:, qb] += qb_pts * n_tds
-    return out - out.mean(axis=0, keepdims=True)
+    out = out - out.mean(axis=0, keepdims=True)
+    return (out, team_tds) if return_counts else out
 
 
 def stretch_spread(scores: np.ndarray, positions, factors: dict[str, float]) -> np.ndarray:
@@ -245,6 +253,10 @@ def simulate_player_scores(
     qb_noise_mult: float = 1.0,
     engine: str = "factor",
     stat_knobs: dict | None = None,
+    run_pass_sd: float = 0.0,
+    run_pass_yards: float = 0.0,
+    run_pass_script: float = 0.0,
+    dst_td_cost: float = 0.0,
 ) -> np.ndarray:
     """
     Simulate fantasy points for every player in `df` across `n_trials`
@@ -260,6 +272,16 @@ def simulate_player_scores(
     low- vs high-target WR1s, QB1~RB1 +0.04 vs +0.14 by RB targets.
     `qb_noise_mult` scales QBs' own (player-level) noise; below 1 more of a
     QB's game comes from his team, his receivers and the game (`TD_MODEL`).
+
+    Run-vs-pass and DST knobs (all 0 = off, the old behavior exactly):
+    `run_pass_sd` tilts each team-game's TD rates toward passing or running
+    (pass x exp(s*u), rush x exp(-s*u), u ~ N(0, 1) per team per trial), so a
+    big RB game usually comes with a smaller passing game, as in real games
+    (QB1~RB1 both top 10%: 0.74x independent; the TD layer alone gives ~1.5x).
+    `run_pass_yards` moves yardage the same way (pass catchers and QB x
+    (1 + k*u), RBs x (1 - k*u)). `run_pass_script` ties u to the score: a
+    team that leads runs more. `dst_td_cost` takes that many DST points per
+    opponent TD above the opponent's average (real QB~opp DST -0.41).
 
     `engine="stat"` replaces steps 1-6 with simulated box scores
     (`statsim.stat_game_scores`, knobs in `stat_knobs`): yards, catches,
@@ -426,6 +448,20 @@ def simulate_player_scores(
         shootout = rng.normal(0.0, shootout_sd, size=(n_trials, n_games))
         game_script_adj[:, pass_mask] += shootout[:, game_id_arr[pass_mask]]
 
+    # Run vs pass: one tilt per team per trial (drawn only when on, so the old
+    # random stream is untouched); positive = a passing game, negative = a
+    # running game. With run_pass_script a leading team leans toward the run.
+    tilt = None
+    if run_pass_sd or run_pass_yards:
+        tilt = rng.normal(0.0, 1.0, size=(n_trials, n_teams))
+        if run_pass_script:
+            rho = float(np.clip(run_pass_script, -0.95, 0.95))
+            ms = script_signal / (script_signal.std(axis=0, keepdims=True) + 1e-9)
+            tilt = np.sqrt(1.0 - rho ** 2) * tilt - rho * ms
+        if run_pass_yards:
+            game_script_adj[:, pass_mask] += run_pass_yards * tilt[:, player_team_idx[pass_mask]]
+            game_script_adj[:, rb_mask] -= run_pass_yards * tilt[:, player_team_idx[rb_mask]]
+
     mean_component = proj[None, :] * (player_offense_factor + game_script_adj)
     mean_component[:, dst_mask] = proj[None, dst_mask] * (2.0 - opp_offense_factor[:, dst_mask])
 
@@ -438,8 +474,18 @@ def simulate_player_scores(
     if td_layer:
         game_td = np.exp(rng.normal(0.0, td_game_sd, size=(n_trials, n_games)) - td_game_sd ** 2 / 2) \
             if td_game_sd else np.ones((n_trials, n_games))
-        scores = scores + td_layer * touchdown_points(
-            df, team_points_draw * game_td[:, team_game_arr], player_team_idx, team_names, rng)
+        pm = rm = None
+        if run_pass_sd and tilt is not None:
+            pm = np.exp(run_pass_sd * tilt - run_pass_sd ** 2 / 2)
+            rm = np.exp(-run_pass_sd * tilt - run_pass_sd ** 2 / 2)
+        td, team_tds = touchdown_points(df, team_points_draw * game_td[:, team_game_arr], player_team_idx,
+                                        team_names, rng, pass_mult=pm, rush_mult=rm, return_counts=True)
+        scores = scores + td_layer * td
+        if dst_td_cost:
+            rows = np.flatnonzero(dst_mask & (player_opp_team_idx >= 0))
+            if len(rows):
+                opp_tds = team_tds[:, player_opp_team_idx[rows]]
+                scores[:, rows] -= dst_td_cost * (opp_tds - opp_tds.mean(axis=0, keepdims=True))
     return _fit_marginals(scores, df, calibrate_ceiling, ceiling_pct, spread_scale, use_percentiles)
 
 

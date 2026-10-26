@@ -995,6 +995,91 @@ that section):
   lineups scored on the Milly: 62 vs 52 above the cash line, but 7 vs 9
   top-1%, 0 vs 2 top-0.1%, best 180.2 vs 197.4. More cashes, a weaker top
   end: one week, so not a verdict.
+- **Reverse-engineering the regulars** (13 contests, 2,286,625 entries from
+  222,286 accounts, every entry mapped to its lineup; 596 regulars with
+  20+ entries in 5+ contests of a format: 484 Classic, 246 Showdown; our
+  engine's 150 backtest picks scored as one more account). Scripts in the
+  scratchpad (`rev/`, `own_cal/`, `tail/`); the full write-up is the
+  "How the Regulars Build" report.
+  - *Style repeats, results don't.* Odd vs even contests, rank correlation
+    across regulars: salary left 0.89 / 0.87 (Classic / Showdown),
+    concentration 0.90 / 0.81, ownership 0.84 / 0.66, projection
+    0.79 / 0.62; average finish 0.23 / 0.29, capped ROI 0.16 / 0.12,
+    top-1% rate 0.10 / 0.06.
+  - *What they weigh* (choice model: each regular's lineups vs 40 random
+    real lineups from the same contest). Classic: at equal projection the
+    typical regular leans toward ownership (+0.32); our engine is at
+    -1.34, more anti-crowd than all but 5 of 482, and chases projection
+    harder than all but 7. Regulars' ownership weight correlates +0.38
+    with their capped ROI and +0.50 with their points.
+  - *Edge split.* An account's points edge over the field = picking
+    higher-projected players + picking players who beat projections.
+    Classic regulars +0.14 field sd = +0.09 + +0.06; the projection part
+    repeats (0.73 between halves), the beat-projection part doesn't
+    (0.00; Showdown -0.04). Accounts best at beating projections in the
+    other contests led no better in the held-out one. No regular shows a
+    lasting information edge. Our engine: +0.24 from projections, -0.06
+    from beating them (4 of 7 contests negative); it leans into value
+    plays harder than 99.8% of regulars, and value plays fell short of
+    projections (-0.11 sd per sd of value, t -2.2; mostly our own
+    projections in Weeks 1-4).
+  - *Habits that pay* (within-contest slopes averaged over contests).
+    Our sim's rating of an account's lineups is the strongest predictor of
+    its real results: Showdown top-1% +0.38 points per sd (6 of 6, t 8.0),
+    Classic top-5% +1.2 (7 of 7). Ownership: Classic capped ROI +8 per sd
+    (6 of 7), Showdown top-1% +0.39 (6 of 6). Bad: no QB stack (Classic,
+    0 of 7), salary left (Showdown capped ROI -9 per sd, 0 of 6), RB
+    captains and DSTs (Showdown). Jointly, Classic ownership still pays
+    after our sim's rating and projection (top-5% t 2.9); projection
+    beyond that costs (t -2.0).
+  - *Same menu, different pickers* (each rule picks 150 of the lineups
+    really entered, pre-lock information only, 40% cap; a pick earns what
+    that lineup earned per entry). Classic capped ROI: our engine's picks
+    +21%, our sim's top-0.1% rating +16%, regulars' style rules -23% to
+    -28%, real regulars -35%, field -48%; fade-ownership -59%, contrarian
+    style -77%. Without Week 2 the order flips: style rules -29% to -34%,
+    our sim's rating -39%, our engine -46%. Showdown: highest ownership -1%,
+    our sim's rating -4%, style rules -9% to -13%, our engine -21%, real
+    regulars and field -45%.
+  - *Where the sim and real contests disagree* (every real lineup, real
+    top-1% odds vs the sim's, per contest). Classic: crowd lean (ownership
+    minus what projection implies) x1.33 per sd (6 of 7); by decile the
+    real/sim ratio runs 0.74 -> 1.75; at equal sim projection those lineups
+    scored +3.1 points per sd (6 of 7, t 3.4). QB with his own RB x0.74
+    (7 of 7). Showdown: DST x0.53 (6 of 6), 5-1 x0.67, no QB x0.72, each
+    $1k left x0.84.
+  - *Joint booms vs real games* (nflverse 2021-25, 1,076 team-games, both
+    players in their top 10%, x independent): QB with own RB1 real 0.74,
+    Classic sim 1.48, Showdown sim 2.00; RB1 with WR1 0.56 / 1.08 / 1.12;
+    QB with WR1 2.97 / 2.80 / 3.19; QB with TE1 3.53 / 2.77 / 2.74. Classic
+    sim defenses are nearly independent of the offense they face (QB vs
+    opposing DST -0.01; real -0.41, Showdown sim -0.48): every team-level
+    swing comes through the TD layer, which DSTs aren't in.
+  - *Fixes.* Crowd-lean correction for Classic (each candidate's top-1%
+    hits scaled by exp(c x lean), c fit on the other contests, plus about
+    1,000 crowd-leaning candidates per slate): 150 entries top-1% 38 vs 29
+    (better in 5 of 7), cashes 362 vs 329, capped ROI +52% vs +29%, mostly
+    Week 2; 20 entries slightly worse. Promising, not adopted; re-test each
+    week. In Showdown the same correction ranked real entries worse in 4
+    of 6 (rejected). New sim knobs, all off by default (the old sim draw
+    for draw): `dst_td_cost`, `run_pass_sd`, `run_pass_yards`,
+    `run_pass_script` (factor model); `td_mix_sd`, `share_tilt`,
+    `rush_eff_corr` (stat engine). Classic sim refits, fit to real games
+    only, then backtested on all 7 Classic contests (seed 7, usual flags):
+    the DST link alone (1.77 DST points per opposing TD) left the ranking
+    unchanged and the picks slightly worse (150 entries: 23 vs 29 top-1%,
+    capped ROI +15% vs +29%). The full refit (loss in real-game standard
+    errors 6.3 -> 1.9; DST pairs match, QB~opp DST -0.41) ranks real lineups
+    better (log and Brier skill better in 6 of 7, AUC +0.007 in 5 of 7), but
+    its picks were no better: top-1% 30 vs 29, cashes 336 vs 329, capped ROI
+    +20% vs +29% (Week 2; -44% vs -46% without it). Its best-rated 5% held
+    no more real winners (1.78% vs 1.86% top 1%). DST link plus
+    `run_pass_yards` 0.3: the biggest ranking gain (AUC +0.016, 5 of 7;
+    2.02% of its best-rated 5% finished top 1%), worse picks (cashes 316 vs
+    329, capped ROI lower in 6 of 7). None adopted; the knobs stay for
+    testing on new contests. Real QB~RB1 co-booms are hard to reach: in the
+    stat engine even fully separate rushing efficiency only takes them from
+    1.84x to 1.77x (real 0.74x).
 - **The regulars share the Showdown blind spot** (six Showdowns; accounts
   with 100+ entries vs single-entry players, each build's top-1% rate
   relative to its own group's average). Regulars play more 5-1 builds

@@ -52,3 +52,17 @@ def test_stat_engine_through_simulate_fits_each_player_to_proj_and_ceiling():
     import pytest
     with pytest.raises(ValueError):
         simulate_player_scores(df, n_trials=100, seed=5, engine="nope")
+
+
+def test_stat_engine_run_pass_tilt_default_off_and_splits_qb_rb_booms():
+    df = _showdown_with_k()
+    ix = {n: i for i, n in enumerate(df["name"])}
+    a = stat_game_scores(df, 20000, np.random.default_rng(9))
+    b = stat_game_scores(df, 20000, np.random.default_rng(9), {"td_mix_sd": 0.0, "share_tilt": 0.0})
+    assert np.array_equal(a, b)
+    c = stat_game_scores(df, 20000, np.random.default_rng(9), {"td_mix_sd": 0.9, "share_tilt": 0.06})
+    qb, rb = ix["AAA QB11000"], ix["AAA RB9000"]
+
+    def co_boom(sc, q=0.9):
+        return ((sc[:, qb] >= np.quantile(sc[:, qb], q)) & (sc[:, rb] >= np.quantile(sc[:, rb], q))).mean() / (1 - q) ** 2
+    assert co_boom(c) < co_boom(a) - 0.2

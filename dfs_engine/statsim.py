@@ -79,6 +79,10 @@ STAT_KNOBS = {
     "fg_eff_load": 0.0,        # field goal attempts vs offensive efficiency
     "fg_td_tradeoff": 0.25,    # fewer field goals when the drives end in TDs
 }
+# Off by default: "rush_eff_corr" (1 = rushing shares the passing efficiency shock; below 1 part of it is
+# its own, so a big passing day no longer lifts the run game with it). "td_mix_sd" (0) tilts each team-game's TD rates toward passing or rushing (pass x exp(s*u),
+# rush x exp(-s*u)); "share_tilt" moves its pass share with the same u. Real games: a QB and his RB1 both
+# finish in their top 10% at 0.74x the independent rate; the stat sim gives ~2x without this.
 
 
 def _pos_key(p: str, table: dict) -> str:
@@ -188,6 +192,10 @@ def stat_game_scores(df: pd.DataFrame, n_trials: int, rng: np.random.Generator,
     g_score = rng.normal(0.0, k["game_score_sd"], (n_trials, n_games))
     g_pace = rng.normal(0.0, k["pace_sd"], (n_trials, n_games))
     eff = {t: rng.normal(0.0, k["team_eff_sd"], n_trials) for t in all_teams}
+    # rushing efficiency: the same shock as passing unless rush_eff_corr < 1 (then partly its own)
+    rc = float(k.get("rush_eff_corr", 1.0))
+    eff_rush = eff if rc >= 1.0 else {
+        t: rc * eff[t] + np.sqrt(1.0 - rc ** 2) * rng.normal(0.0, k["team_eff_sd"], n_trials) for t in all_teams}
 
     # A pool can project a team for more volume than real teams get (deep synthetic pools, generous
     # projections): scale that team's dropbacks / carries up so each player's box scores can reach
@@ -203,10 +211,15 @@ def stat_game_scores(df: pd.DataFrame, n_trials: int, rng: np.random.Generator,
         gi = g_index[game_of[t]]
         o = opp_of.get(t)
         e = g_score[:, gi] + eff[t]                         # this offense's scoring shock
+        e_r = g_score[:, gi] + eff_rush[t]                  # ... on the ground (= e unless rush_eff_corr < 1)
         deficit = (eff[o] - eff[t]) if isinstance(o, str) and o in eff else np.zeros(n_trials)
         exp_margin = imp[t] - (imp[o] if isinstance(o, str) and o in imp else imp[t])
+        mix_u = None
+        if k.get("td_mix_sd", 0.0) or k.get("share_tilt", 0.0):  # run-vs-pass tilt (off by default)
+            mix_u = rng.normal(0.0, 1.0, n_trials)
         share = np.clip(DROPBACKS / (DROPBACKS + CARRIES) - 0.004 * exp_margin + k["script"] * deficit
-                        + rng.normal(0.0, k["dropback_noise"], n_trials), 0.35, 0.80)
+                        + rng.normal(0.0, k["dropback_noise"], n_trials)
+                        + (k.get("share_tilt", 0.0) * mix_u if mix_u is not None else 0.0), 0.35, 0.80)
         plays = np.maximum(np.round(rng.normal((DROPBACKS + CARRIES) * np.exp(g_pace[:, gi]), 5.5)), 35)
         dropbacks = np.round(plays * share)
         carries = plays - dropbacks
@@ -217,8 +230,8 @@ def stat_game_scores(df: pd.DataFrame, n_trials: int, rng: np.random.Generator,
         att = dropbacks - sacks
         ints = rng.poisson(INT_RATE * att * np.exp(-0.3 * e))
         fum = rng.poisson(FUMBLES_LOST * plays / (DROPBACKS + CARRIES))
-        box[t] = {"e": e, "deficit": deficit, "gi": gi, "att": att, "tgts": np.round(att * TARGETS_PER_ATT),
-                  "carries": carries, "sacks": sacks, "ints": ints, "fum": fum}
+        box[t] = {"e": e, "e_r": e_r, "deficit": deficit, "gi": gi, "att": att, "tgts": np.round(att * TARGETS_PER_ATT),
+                  "carries": carries, "sacks": sacks, "ints": ints, "fum": fum, "mix_u": mix_u}
     # 2. scoring: an opponent's turnovers hand this offense extra (and shorter) possessions
     exp_to = INT_RATE * DROPBACKS * (1 - SACK_RATE) + FUMBLES_LOST
     for t in all_teams:
@@ -231,7 +244,11 @@ def stat_game_scores(df: pd.DataFrame, n_trials: int, rng: np.random.Generator,
         lam_p = PASS_TDS * scale ** PASS_TD_ELASTICITY * bonus * np.exp(
             k["pass_td_load"] * e - 0.5 * (k["pass_td_load"] * k["team_eff_sd"]) ** 2)
         lam_r = RUSH_TDS * scale ** RUSH_TD_ELASTICITY * bonus * np.exp(
-            k["rush_td_load"] * e - k["script_rush_td"] * deficit - 0.5 * (k["rush_td_load"] * k["team_eff_sd"]) ** 2)
+            k["rush_td_load"] * b["e_r"] - k["script_rush_td"] * deficit - 0.5 * (k["rush_td_load"] * k["team_eff_sd"]) ** 2)
+        mx = k.get("td_mix_sd", 0.0)
+        if mx and b["mix_u"] is not None:  # a passing game's TDs come through the air, a running game's on the ground
+            lam_p = lam_p * np.exp(mx * b["mix_u"] - mx * mx / 2)
+            lam_r = lam_r * np.exp(-mx * b["mix_u"] - mx * mx / 2)
         b["pass_td"] = rng.poisson(lam_p)
         b["rush_td"] = rng.poisson(lam_r)
         b["tds"] = b["pass_td"] + b["rush_td"]
@@ -266,6 +283,7 @@ def stat_game_scores(df: pd.DataFrame, n_trials: int, rng: np.random.Generator,
         exp_c[-1] = max(CARRIES * vol[t][1] - exp_c[:-1].sum(), 0.05 * CARRIES)
         ca = _dirichlet_multinomial(rng, b["carries"], exp_c, k["carry_conc"])
         ymult = np.exp(k["yards_load"] * b["e"])[:, None]
+        ymult_r = ymult if b["e_r"] is b["e"] else np.exp(k["yards_load"] * b["e_r"])[:, None]
         rec = np.zeros_like(tg)
         rec_yds = np.zeros(tg.shape)
         rush_yds = np.zeros(ca.shape)
@@ -275,7 +293,7 @@ def stat_game_scores(df: pd.DataFrame, n_trials: int, rng: np.random.Generator,
             rec[:, j] = rng.binomial(tg[:, j], CATCH[pk])
             rec_yds[:, j] = _gamma_sum(rng, rec[:, j], YDS_PER_CATCH[pk], CATCH_CV[pk], ymult[:, 0])
             ck = _pos_key(p, YDS_PER_CARRY)
-            rush_yds[:, j] = _gamma_sum(rng, ca[:, j], YDS_PER_CARRY[ck], CARRY_CV[ck], ymult[:, 0])
+            rush_yds[:, j] = _gamma_sum(rng, ca[:, j], YDS_PER_CARRY[ck], CARRY_CV[ck], ymult_r[:, 0])
         # TDs go to whoever got the looks this game
         rec_rate = np.array([REC_TD_PER_TGT[_pos_key(p, REC_TD_PER_TGT)] for p in ppos])
         rush_rate = np.array([RUSH_TD_PER_CARRY[_pos_key(p, RUSH_TD_PER_CARRY)] for p in ppos])
