@@ -1016,6 +1016,81 @@ that section):
   pick stands unless a correction has passed the backtest. The refit
   Showdown sim on SNF8: same single pick, AUC 0.876 vs 0.866, 150 entries
   39 vs 44 cashes, 3 vs 3 top-1%.
+- **Week 8 MNF Showdown** (DAL @ PHI, $20, 73,529 entries; Hurts out): we
+  entered the engine's long-sim pick (20,000 + 10,000 sims, seed 11), CPT
+  Javonte Williams, Lamb, Prescott, Aubrey, Cowboys DST, Darius Cooper (a
+  Dallas 5-1): 105.13, 17,799th (top 24%), about a point under the
+  estimated cash line, $0; 194 real copies (we expected 96). The winners
+  (126.73, two entries) had the same Dallas 5-1 shape with Makai Lemon at
+  captain (4.8% captained) and Flournoy, where we had the DST (4.0) and
+  Cooper (2.7, 36.5% owned). Our 20-lineup set for this contest (built, not
+  entered): 6 cashes, best 4,601st, about $240 on $400. 20-lineup sets are
+  now 0 for 5 in the $20 Monday/Thursday Showdowns (-38%). Backtest (seed
+  7, usual flags): 1 entry cashed (8,877th; a different pick, CPT Williams
+  with Prescott, Pickens, Goedert, Cowboys, Lemon); 20 entries $320 on $400
+  (8 cashes); 150 entries $1,240 on $3,000 (31 cashes, best 1,458th).
+  SaberSim's ownership was nearly exact (corr 0.99); projections corr 0.88
+  (RB -3.4, TE +2.5); the sim ran wider than reality (88% inside its 10-90%
+  band). Max-entry accounts finished top 1% at 0.59% vs casuals' 1.43%.
+- **"Cracking the DFS Code" (Kevin "Geek" Alan, 2026), tested on our
+  data.** His study: 376 Classic Sunday main-slate GPPs with 10,000+ entries
+  (2022-25), the top 100 lineups of each (34,856), full-field actual
+  ownership and closing lines. With no full-field lineups, his build stats
+  describe winners without a field baseline; his leverage figures (top-100
+  usage / field ownership) are the fair comparison. We checked each
+  Appendix A rule on our 7 Millys' full fields (top-1% and top-0.1% rates vs
+  the field, also within projection fifths) and by re-picking the engine's
+  saved candidates with the rule enforced (seed 7, usual flags), graded on
+  the real standings. Base, 150 entries a contest: 29 top-1%, 6 top-0.1%,
+  329 cashes, capped ROI +29%. None passed:
+  - *Ownership band 110-135% (Milly):* the field's edge inside it is mostly
+    projection (1.06x at equal projection; under 90% total ownership 0.73x).
+    Enforced: 31 / 10 / 282 cashes (945 lineups: Week 3 had 45 qualifying
+    candidates); 20 entries 4 vs 6 top-1%. Cap only (under 135%): 37 / 9 /
+    303, but its 20-lineup set lost Week 2's $100k. With DraftKings'
+    %Drafted, 2026 top-100 lineups sum to a median ~125% (weekly 93-155%),
+    inside his 116-132% for 2022-25.
+  - *A sub-10% RB/WR/TE:* the engine already has one in 97% of lineups.
+  - *Stacking:* naked QBs 0.61x; QB+2 1.33x vs QB+1 0.86x (the same at
+    equal projection); QB+3 2.5x on 2% of entries. Our top-1% finishers
+    were 45% QB+1, 41% QB+2, 9% naked, 5% QB+3, close to his 49/38/10.
+    Forcing QB+2: 30 / 5 / 293.
+  - *Second cluster* (an RB plus the other side's WR, outside the QB's
+    game): 20 / 4 / 265, and lost the $100k.
+  - *RB floor:* lineups with an RB under $5,000 finished top 1% at 0.3-0.5x
+    (the same at equal projection), but the engine already almost never
+    plays RBs under $4,500. Barring RBs under $5,000 (full re-run): 33
+    top-1%, 315 cashes, capped ROI +15%; unclear.
+  - *WR punt cap:* 27 / 6 / 317. *TEs under $5K:* 24 / 4 / 324. *Double TE
+    only with two sub-$5K TEs:* 26 / 5 / 347 (more cashes in 6 of 7, ROI
+    without Week 2 -42% vs -46%, fewer top-1%). *No RB from a team implied
+    under 20:* 24 / 7 / 301.
+  - *Game selection:* stacks from the 2nd-3rd game totals 1.54x vs the
+    highest total 0.59x (below 1 in 5 of 7 weeks). Barring QBs implied for
+    26+: 27 / 0 / 310, and lost Week 2's $100k (a 26+ stack).
+  - *2-3 QBs in 20 lineups:* the engine uses 8-12; its top 3 only: 4 vs 6
+    top-1%, 56 vs 50 cashes.
+  - *Projections:* no SaberSim bias for his groups within noise (home TEs
+    +1.4 vs road -1.4 points in Weeks 7-8; cheap QBs -0.4; favored vs
+    underdog DSTs +0.4 vs +0.5).
+  - *DSTs (his most robust finding: home favorites 1.18, positive every
+    season; underdogs 0.86; sub-5% "darts" 0.95, 10-20% owned 1.15).* Ours,
+    home/away from the nflverse 2026 schedule: home favorites 0.91 (above 1
+    in 3 of 7 weeks), road favorites 1.13, underdogs 1.00. The engine plays
+    home favorites at the field's rate (35%) but dart DSTs far more often
+    (55% vs 33%).
+  - *QBs by role:* home underdogs 1.24 (mostly Week 1, 6.0), road
+    underdogs 1.23, favorites 0.82-0.87. 2026 top-100 vs his 2025: QB under
+    $5K 21% (22%), $7K+ 2% (2.7%), underdog QB 48% (41%), double TE 41%
+    (26%), WR in the FLEX 26% (32%), bring-back 57% (55%). The engine: 11%,
+    5%, 35%, 49%, 26%, 62%.
+  - *Tilts* (the saved models re-ranked with tilted sims, the field
+    unchanged): home-favorite DSTs x1.15 (x1.21 vs offenses implied under
+    20), underdog DSTs x0.90: home-favorite share 35% -> 49%, darts 55% ->
+    53%; 150 entries 24 / 2 / 311, capped ROI +9%. Home-underdog QBs x1.10:
+    26 / 7 / 314. QBs under $5K x1.10: 24 / 3 / 312 (worse on every
+    measure). All three: 21 / 3 / 289. None adopted. The DST and QB-role
+    checks re-run as contests arrive. Scripts in the scratchpad (`book/`).
 - **Reverse-engineering the regulars** (13 contests, 2,286,625 entries from
   222,286 accounts, every entry mapped to its lineup; 596 regulars with
   20+ entries in 5+ contests of a format: 484 Classic, 246 Showdown; our
