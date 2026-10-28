@@ -1235,10 +1235,29 @@ that section):
   real fields spread their copies more evenly than ours. The engine
   favors lineups it thinks are rare, so it picks the ones it undercounts
   most, and its top-1% odds for them are too high. SaberSim's own
-  lineups aren't the cause: none of our top 50 were in its pool. Not
-  corrected yet; it is the next thing to test. (Copies don't change the
-  chance of a top-1% finish, since copies tie; they cut what a top
-  finish pays, and the top-1% pick rule barely sees them.)
+  lineups aren't the cause: none of our top 50 were in its pool. (Copies
+  don't change the chance of a top-1% finish, since copies tie; they cut
+  what a top finish pays, and the top-1% pick rule barely sees them.)
+  Re-measured on all 8 Showdowns: our 10 best-rated lineups drew 2.3x the
+  expected copies (above 1 in all 8), ranks 11-50 1.9x, 51-200 1.5x,
+  201-1,000 1.1x, past 1,000 0.7x; within 2 points of the best projection
+  0.6x, 10+ points back 1.5x; all candidates 0.97-1.15x. A noisier
+  optimizer slice in the simulated field (projection noise 0.30 instead of
+  0.18) fixes the projection pattern (0-2 points back 1.0x) but not the
+  favorite-lineup one (still 2.4x): real players' sim-based tools seem to
+  build the same high-ceiling lineups we do. Upper bound: pricing every
+  candidate with its real copy count did not improve the picks. Top-1%
+  objective: 19 vs 23 top-1% at 150 entries, unchanged at 1 and 20.
+  Expected payout with real copies picked lineups with about 4 copies and
+  won $9.1k vs $19.3k. Payout capped at 11th place: 27 vs 23 top-1% and
+  345 vs 302 cashes, but 2 vs 6 top-0.1% and $16.8k vs $19.3k. So no copy
+  model: being unique doesn't pay by itself, because lineups nobody plays
+  are mostly worse. The noisier field with the usual top-1% objective:
+  150 entries capped ROI -11% vs -25% (better in 7 of 8), top-1% 24 vs 23,
+  cashes 312 vs 302 (and a TNF8 1st place); 20 entries capped ROI -6% vs
+  +1%; 1 entry one fewer cash. Not made the default, since it gains
+  nothing at the 1-20 entries we play; `--field-optimizer-noise 0.3`
+  turns it on. Scripts in the scratchpad (`dupes2/`).
 - **The sim overrates one-sided Showdown builds** (six Showdowns, ~17,000
   of our backtest candidates, the sim's top-1% chance vs real finishes).
   5-1 team splits finished top 1% at 0.32x the sim's rate (short in all
