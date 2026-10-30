@@ -1032,6 +1032,21 @@ that section):
   SaberSim's ownership was nearly exact (corr 0.99); projections corr 0.88
   (RB -3.4, TE +2.5); the sim ran wider than reality (88% inside its 10-90%
   band). Max-entry accounts finished top 1% at 0.59% vs casuals' 1.43%.
+- **Week 9 TNF Showdown** (CAR @ GB, $20, 73,529 entries; plus our first
+  small-field test, the $0.25 Quarter Jukebox: 9,512 entries from 2,092
+  accounts, none with 150 entries). We entered a less-duplicated
+  alternative to the engine's pick (CPT Golden for CPT Jacobs; sim copies
+  15 vs 55): 102.87, 23,768th, $0. The engine's pick would have scored
+  103.22 (22,920th). Real copies were 58 and 237, about 4x what the sim
+  expected. Winners (125.47, 33 entries): CPT Hubbard (12.5% captained),
+  Love, Jacobs, Golden, Kraft, Mitchell Evans ($1,600, 5.3% owned).
+  Jukebox, our 12 long-sim lineups: 5 cashes, best 407th, about $2.56 on
+  $3. Backtest (seed 7, usual flags): $20 contest 1 entry $0, 20 entries
+  $200 on $400, 150 entries $1,280 on $3,000 (2 top-1%); Jukebox 20
+  entries $2.08 on $5, 150 entries $20 on $37.50 (35 cashes, best 42nd).
+  20-lineup sets are now 0 for 6 in the $20 Monday/Thursday Showdowns.
+  Projections corr 0.89, ownership 0.97; the sim ran wide again (93% of
+  players inside its 10-90% band; MNF 88%).
 - **"Cracking the DFS Code" (Kevin "Geek" Alan, 2026), tested on our
   data.** His study: 376 Classic Sunday main-slate GPPs with 10,000+ entries
   (2022-25), the top 100 lineups of each (34,856), full-field actual
