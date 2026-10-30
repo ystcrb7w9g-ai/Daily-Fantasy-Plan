@@ -1030,8 +1030,9 @@ that section):
   with Prescott, Pickens, Goedert, Cowboys, Lemon); 20 entries $320 on $400
   (8 cashes); 150 entries $1,240 on $3,000 (31 cashes, best 1,458th).
   SaberSim's ownership was nearly exact (corr 0.99); projections corr 0.88
-  (RB -3.4, TE +2.5); the sim ran wider than reality (88% inside its 10-90%
-  band). Max-entry accounts finished top 1% at 0.59% vs casuals' 1.43%.
+  (RB -3.4, TE +2.5); 88% of players inside the sim's 10-90% band by the
+  old measure (re-measured below). Max-entry accounts finished top 1% at
+  0.59% vs casuals' 1.43%.
 - **Week 9 TNF Showdown** (CAR @ GB, $20, 73,529 entries; plus our first
   small-field test, the $0.25 Quarter Jukebox: 9,512 entries from 2,092
   accounts, none with 150 entries). We entered a less-duplicated
@@ -1045,8 +1046,24 @@ that section):
   $200 on $400, 150 entries $1,280 on $3,000 (2 top-1%); Jukebox 20
   entries $2.08 on $5, 150 entries $20 on $37.50 (35 cashes, best 42nd).
   20-lineup sets are now 0 for 6 in the $20 Monday/Thursday Showdowns.
-  Projections corr 0.89, ownership 0.97; the sim ran wide again (93% of
-  players inside its 10-90% band; MNF 88%).
+  Projections corr 0.89, ownership 0.97; 93% of players inside the sim's
+  10-90% band by the old measure (re-measured below).
+- **Sim width, re-measured** (all 17 contests; each slate's cached sims vs
+  real points). The weekly check in `review` counts a player as inside his
+  10-90% range whenever he scores 0 and the sim gave 0 that often, so
+  backups inflate it. With ties spread over their probability (randomized
+  PIT), Classic is on target: 7 Millys, 1,498 players, 79% inside the
+  10-90% range, 10% below the 10th percentile, 11% above the 90th. The
+  Showdown sim misses at the top only. 9 games, 142 player-games with
+  under a 10% chance of 0: 92% inside, 15.5% above the 85th percentile
+  (15% expected), but 2.8% above the 90th (10%) and none above the 95th
+  (7 expected). 8 of 9 games had fewer above the 90th than expected, and
+  none had a player above the 95th, including the 71-point BUF @ LA game.
+  Real scores bunch between the sim's 75th and 90th percentiles (27.5% vs
+  15%). The top end is SaberSim's own p95/p99, which the sim maps onto.
+  Same direction as the game-script study's 13-31% excess build upside.
+  A Showdown top-end trim is untested; `review` still prints the old
+  measure.
 - **"Cracking the DFS Code" (Kevin "Geek" Alan, 2026), tested on our
   data.** His study: 376 Classic Sunday main-slate GPPs with 10,000+ entries
   (2022-25), the top 100 lineups of each (34,856), full-field actual
