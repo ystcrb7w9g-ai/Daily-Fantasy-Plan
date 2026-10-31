@@ -1064,6 +1064,24 @@ that section):
   Same direction as the game-script study's 13-31% excess build upside.
   A Showdown top-end trim is untested; `review` still prints the old
   measure.
+- **Bigger Showdown pool (the size Stokastic's Max plan sells), rejected**
+  (all 10 Showdown contests, seed 7, usual flags; only the pool changes).
+  The usual pool (2,000 of ours plus SaberSim's export) was topped up with
+  lineups each optimal for a blend of 85-100% one simulated game and the
+  rest projection, from sims the backtest doesn't use. Our generator runs
+  out of new lineups short of 25,000 in 8 of 9 games, so pools were 19,410
+  to 25,000. The big pools held the real winner in 10 of 10 contests (usual
+  7) and 538 of 588 real top-1% lineups (usual 196), but the sim rated the
+  winners 5th to 7,125th (median about 950th) and the picks got worse. 150
+  lineups: 308 vs 369 cashes (fewer in all 10), 20 vs 27 top-1%, capped ROI
+  -42% vs -29% (worse in 9 of 10); uncapped $26,198 vs $20,645 only because
+  of one TNF8 hit ($13,113 vs $2,618). 20 lineups: 49 vs 55 cashes, capped
+  ROI -13% vs -6%. 1 lineup: 9 of 10 picks unchanged; TNF8's changed and
+  lost the $40 the usual pick won. 49-96 of each 150 picks came from the new
+  lineups: sim-optimal builds rate higher in the sim than they score, which
+  fits the Showdown sim's high top end. Each run took about 5.5 minutes and
+  6-7.7 GB. (The Week 8 SNF entry run billed as 25,000 lineups had about
+  10,900 distinct ones, screened to 1,500.)
 - **"Cracking the DFS Code" (Kevin "Geek" Alan, 2026), tested on our
   data.** His study: 376 Classic Sunday main-slate GPPs with 10,000+ entries
   (2022-25), the top 100 lineups of each (34,856), full-field actual
